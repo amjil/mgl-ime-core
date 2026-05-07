@@ -1,0 +1,36 @@
+(ns ime-core.next-word
+  (:require
+   [clojure.string :as str]
+   [ime-core.asset-loader :as loader]
+   [ime-core.remote-api :as remote]))
+
+;; 1. Global state for local prediction dictionary
+(defonce !next-dict (atom nil))
+
+;; 2. Preload prediction dictionary on startup (Local mode)
+(defn ^:async ensure-loaded []
+  (when (nil? @!next-dict)
+    (await (loader/load-assets-parallel [[!next-dict "assets/next.zip"]]))))
+
+;; 3. Local prediction lookup logic
+(defn- get-local-predictions [prev-word]
+  (if-let [raw-preds (get @!next-dict prev-word)]
+    ;; Extract and filter the first element of nested lists
+    (->> raw-preds
+         (filter #(not (nil? (first %))))
+         (map first)
+         vec)
+    []))
+
+;; 4. Unified facade for next-word predictions
+(defn ^:async get-predictions-async 
+  "Unified entry point for retrieving next-word candidates.
+   Determines whether to query the remote API or the local dictionary based on config."
+  [prev-word {:keys [use-remote?] :or {use-remote? false}}]
+  (if (str/blank? prev-word)
+    []
+    (if use-remote?
+      (await (remote/get-next-words-remote prev-word))
+      (do
+        (await (ensure-loaded))
+        (get-local-predictions prev-word)))))

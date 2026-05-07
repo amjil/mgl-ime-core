@@ -1,0 +1,71 @@
+(ns ime-core.asset-loader
+  (:require
+   ["dart:io" :as io]
+   ["dart:async" :as async]
+   ["dart:convert" :as convert]
+   ["package:flutter/services.dart" :refer [rootBundle]]
+   ["package:archive/archive.dart" :as archive]
+   ["package:path_provider/path_provider.dart" :as path-provider]
+   [clojure.string :as str]))
+
+;; 1. Get safe cache directory path
+(defn- ^:async get-cache-file-path [asset-path]
+  (let [cache-dir (await (path-provider/getApplicationCacheDirectory))
+        cache-file-name (str (str/replace asset-path "/" "_") ".json")
+        cache-file (io/File (str (.-path cache-dir) "/" cache-file-name))]
+    cache-file))
+
+;; 2. Load JSON from local cache
+(defn- load-from-cache [^io/File cache-file]
+  (try
+    (when (.existsSync cache-file)
+      (let [content-string (.readAsStringSync cache-file)
+            content (convert/jsonDecode content-string)]
+        content))
+    (catch Exception e
+      (dart:core/print (str "[asset-loader] Error reading cache: " e))
+      nil)))
+
+;; 3. Save parsed JSON to local cache
+(defn- save-to-cache [^io/File cache-file content]
+  (try
+    (.writeAsStringSync cache-file (convert/jsonEncode content))
+    (catch Exception e
+      (dart:core/print (str "[asset-loader] Error saving cache: " e)))))
+
+;; 4. Load ZIP from assets, extract, cache, and assign to Atom
+(defn ^:async read-json-from-asset-zip [asset-atom asset-path]
+  (let [cache-file (await (get-cache-file-path asset-path))
+        cached-content (load-from-cache cache-file)]
+    (if cached-content
+      ;; Cache hit, return directly
+      (reset! asset-atom cached-content)
+      
+      ;; Cache miss, extract from bundle assets
+      (let [result (await
+                    (-> (.load rootBundle asset-path)
+                        (.then (fn [byte-data]
+                                 (let [bytes (.asUint8List (.-buffer byte-data))
+                                       ar (.decodeBytes (archive/ZipDecoder.) bytes)
+                                       target-file (first ar)]
+                                   (if target-file
+                                     (let [content (.-content target-file)
+                                           content-string (convert/utf8.decode content)
+                                           parsed-content (convert/jsonDecode content-string)]
+                                       ;; Store in Atom and write to cache
+                                       (reset! asset-atom parsed-content)
+                                       (save-to-cache cache-file parsed-content)
+                                       parsed-content)
+                                     (throw (Exception. (str "JSON file not found in zip: " asset-path)))))))))]
+        result))))
+
+;; 5. Unified entry: Load all ZIP assets in parallel
+(defn ^:async load-assets-parallel
+  "Loads multiple ZIP asset files in parallel to improve startup speed.
+   asset-configs receives a Vector of [asset-atom asset-path] pairs.
+   Example: [[!next-dict \"assets/next.zip\"]]"
+  [asset-configs]
+  (let [futures (map (fn [[asset-atom asset-path]]
+                       (read-json-from-asset-zip asset-atom asset-path))
+                     asset-configs)]
+    (await (async/Future.wait futures))))

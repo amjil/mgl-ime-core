@@ -1,0 +1,106 @@
+(ns ime-core.fst-engine
+  (:require
+   ["dart:typed_data" :as u]
+   ["package:flutter/services.dart" :refer [rootBundle]]
+   ["dart:convert" :as convert]
+   [ime-core.lru-cache :as lru]
+   [ime-core.remote-api :as remote]))
+
+;; -----------------------------
+;; Utility & Binary Parsing
+;; -----------------------------
+(defn read-u32 [^u/ByteData buf offset]
+  (.getUint32 buf offset u/Endian.little))
+
+(defn read-u64 [^u/ByteData buf offset]
+  (.getUint64 buf offset u/Endian.little))
+
+(defn ^:async load-token-table [path]
+  (let [byte-data (await (.load rootBundle path))
+        count (read-u32 byte-data 0)
+        tokens (loop [i 0 acc []]
+                 (if (< i count)
+                   (recur (inc i) (conj acc (char (read-u32 byte-data (+ 4 (* i 4))))))
+                   acc))]
+    {:tokens tokens
+     :token->char (into {} (map vector (range 0 count) tokens))}))
+
+(defn ^:async load-dict [bin-path idx-path]
+  (let [bin-data (await (.load rootBundle bin-path))
+        idx-data (await (.load rootBundle idx-path))
+        count (/ (.-lengthInBytes idx-data) 8)]
+    {:bin bin-data :idx idx-data :count count}))
+
+(defn dict-get-word [dict word-id token->char]
+  (let [offset (read-u64 (:idx dict) (* 8 word-id))
+        len (read-u32 (:bin dict) offset)
+        bin-uint8 (.asUint8List (.-buffer ^u/ByteData (:bin dict)))
+        bytes (.sublist bin-uint8 (+ offset 4) (+ offset 4 len))
+        sb (dart:core/StringBuffer.)]
+    (doseq [b bytes]
+      (.write sb (get token->char b "?")))
+    (.toString sb)))
+
+(defn ^:async load-lists [bin-path idx-path]
+  (let [bin-data (await (.load rootBundle bin-path))
+        idx-data (await (.load rootBundle idx-path))
+        count (/ (.-lengthInBytes idx-data) 8)]
+    {:bin bin-data :idx idx-data :count count}))
+
+(defn lists-get-word-ids [lists key-id]
+  (let [offset (read-u64 (:idx lists) (* 8 key-id))
+        count (read-u32 (:bin lists) offset)
+        word-ids (vec (for [i (range count)]
+                        (read-u32 (:bin lists) (+ offset 4 (* i 4)))))]
+    word-ids))
+
+(defn ^:async load-keys [path]
+  (let [str-data (await (.loadString rootBundle path))
+        m (convert/jsonDecode str-data)]
+    (into {} (map (fn [[k v]] [k (int v)]) m))))
+
+(defn keys-get-id [keys-map key]
+  (get keys-map key))
+
+;; -----------------------------
+;; Core Query Logic
+;; -----------------------------
+(defn get-local-candidates [key keys-map lists dict token-table]
+  (if-let [cached (lru/lru-get key)]
+    cached
+    (let [key-id (keys-get-id keys-map key)]
+      (if (nil? key-id)
+        []
+        (let [word-ids (lists-get-word-ids lists key-id)
+              token->char (:token->char token-table)
+              candidates (vec (map #(dict-get-word dict % token->char) word-ids))]
+          (when-not (empty? candidates)
+            (lru/lru-put key candidates))
+          candidates)))))
+
+;; -----------------------------
+;; Global State & Facade
+;; -----------------------------
+(defonce !token-table (atom nil))
+(defonce !dict (atom nil))
+(defonce !lists (atom nil))
+(defonce !keys-map (atom nil))
+
+(defn ^:async ensure-loaded []
+  (when (nil? @!token-table)
+    (reset! !token-table (await (load-token-table "assets/fst/token_table.bin"))))
+  (when (nil? @!dict)
+    (reset! !dict (await (load-dict "assets/fst/dict.bin" "assets/fst/dict.idx"))))
+  (when (nil? @!lists)
+    (reset! !lists (await (load-lists "assets/fst/lists.bin" "assets/fst/lists.idx"))))
+  (when (nil? @!keys-map)
+    (reset! !keys-map (await (load-keys "assets/fst/keys.json")))))
+
+(defn ^:async get-candidates-async 
+  "Unified query entry point; callers choose remote or local mode."
+  [key {:keys [use-remote?] :or {use-remote? false}}]
+  (if use-remote?
+    (await (remote/get-candidates-remote key))
+    (do
+      (await (ensure-loaded))
+      (get-local-candidates key @!keys-map @!lists @!dict @!token-table))))

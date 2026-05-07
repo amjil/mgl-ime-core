@@ -1,0 +1,204 @@
+(ns ime-core.linguistics
+  (:require
+   ["package:mongol_code/mongol_code.dart" :as code]
+   [clojure.string :as str]))
+
+;; ==========================================
+;; 1. Constants & Definitions
+;; ==========================================
+
+(def all-suffixes
+  [code.Suffix/YIN 
+   code.Suffix/UN code.Suffix/UEN
+   code.Suffix/U code.Suffix/UE
+   code.Suffix/I code.Suffix/YI
+   code.Suffix/DU code.Suffix/DUE
+   code.Suffix/TU code.Suffix/TUE
+   code.Suffix/DUR code.Suffix/DUER
+   code.Suffix/TUR code.Suffix/TUER
+   code.Suffix/DAQI code.Suffix/DEQI
+   code.Suffix/TAQI code.Suffix/TEQI
+   code.Suffix/ACHA code.Suffix/ECHE
+   code.Suffix/BAR code.Suffix/BER
+   code.Suffix/IYAR code.Suffix/IYER
+   code.Suffix/TAI code.Suffix/TEI
+   code.Suffix/LUGA code.Suffix/LUEGE 
+   code.Suffix/BAN code.Suffix/BEN
+   code.Suffix/IYAN code.Suffix/IYEN 
+   code.Suffix/YUGAN code.Suffix/YUEGEN 
+   code.Suffix/DAGAN code.Suffix/DEGEN 
+   code.Suffix/TAGAN code.Suffix/TEGEN 
+   code.Suffix/ACHAGAN code.Suffix/ECHEGEN 
+   code.Suffix/UD code.Suffix/UED
+   code.Suffix/NUGUD code.Suffix/NUEGUED
+   code.Suffix/NAR code.Suffix/NER
+   code.Suffix/UU code.Suffix/UEUE
+   code.Suffix/DA code.Suffix/DE
+   code.Suffix/CHU code.Suffix/CHUE])
+
+(def suffix-candidates-for-full
+  [code.Suffix/YIN 
+   code.Suffix/UN
+   code.Suffix/U 
+   code.Suffix/I 
+   code.Suffix/YI
+   code.Suffix/DU code.Suffix/TU
+   code.Suffix/DUR code.Suffix/TUR 
+   code.Suffix/DAQI code.Suffix/TAQI
+   code.Suffix/ACHA
+   code.Suffix/BAR code.Suffix/IYAR
+   code.Suffix/TAI 
+   code.Suffix/LUGA code.Suffix/LUEGE 
+   code.Suffix/BAN code.Suffix/IYEN 
+   code.Suffix/YUGAN code.Suffix/YUEGEN 
+   code.Suffix/DAGAN code.Suffix/DEGEN 
+   code.Suffix/TAGAN code.Suffix/TEGEN 
+   code.Suffix/ACHAGAN code.Suffix/ECHEGEN 
+   code.Suffix/UD 
+   code.Suffix/NUGUD code.Suffix/NUEGUED
+   code.Suffix/NAR 
+   code.Suffix/UU 
+   code.Suffix/DA 
+   code.Suffix/CHU])
+
+;; ==========================================
+;; 2. Character & String Analysis
+;; ==========================================
+
+(defn is-mongolian? 
+  "Checks if a given character code is a Mongolian letter or control character."
+  [char-code]
+  (if (nil? char-code)
+    false
+    (or (and (>= char-code code/Mongol.a)
+             (<= char-code code/Mongol.chi))
+        (and (>= char-code code/Mongol.nirugu)
+             (<= char-code code/Mongol.mvs))
+        (= char-code 0x202F) ;; NNBSP
+        (= char-code 0x180E)))) ;; MVS
+
+(defn is-mvs-preceding-char? 
+  "Checks if a character code typically precedes the Mongolian Vowel Separator (MVS)."
+  [char-code]
+  (if (nil? char-code)
+    false
+    (or (= char-code code/Mongol.na) (= char-code code/Mongol.qa)
+        (= char-code code/Mongol.ga) (= char-code code/Mongol.ma)
+        (= char-code code/Mongol.la) (= char-code code/Mongol.ja)
+        (= char-code code/Mongol.ya) (= char-code code/Mongol.ra)
+        (= char-code code/Mongol.wa) (= char-code code/Mongol.o)
+        (= char-code code/Mongol.u)  (= char-code code/Mongol.oe)
+        (= char-code code/Mongol.ue))))
+
+(defn is-vowel? 
+  "Checks if a character code represents a Mongolian vowel."
+  [char-code]
+  (if (nil? char-code)
+    false
+    (and (>= char-code code/Mongol.a)
+         (<= char-code code/Mongol.ee))))
+
+;; ==========================================
+;; 3. Context & Location (Init, Medi, Fina, Isol)
+;; ==========================================
+
+(defn get-location 
+  "Determines the positional variant (Isolated, Initial, Medial, Final) 
+   based on surrounding text context."
+  [before after]
+  (cond
+    (empty? before) code.Location/isol
+    
+    (and (some? before)
+         (is-mongolian? (last (map int before)))
+         (empty? after)) 
+    code.Location/medi
+
+    (and (some? before)
+         (is-mongolian? (last (map int before)))
+         (some? after)
+         (is-mongolian? (first (map int after))))
+    code.Location/medi
+
+    (and (some? before)
+         (not (is-mongolian? (last (map int before))))
+         (some? after)
+         (is-mongolian? (first (map int after))))
+    code.Location/init
+
+    (and (some? before)
+         (is-mongolian? (last (map int before))))
+    code.Location/fina
+
+    :else code.Location/isol))
+
+;; ==========================================
+;; 4. Word Extraction & Suffix Logic
+;; ==========================================
+
+(defn get-gender 
+  "Calculates the gender (Masculine, Feminine, or Neuter) of a Mongolian word 
+   based on vowel harmony."
+  [word]
+  (let [vowel-char (first (filter #(and (is-vowel? %)
+                                        (not= code/Mongol.i %))
+                                  (map int word)))]
+    (if (nil? vowel-char)
+      code/Gender.neuter
+      (cond
+        (.isMasculineVowel code/Mongol vowel-char)
+        code/Gender.masculine
+
+        (.isFeminineVowel code/Mongol vowel-char)
+        code/Gender.feminine
+
+        :else
+        code/Gender.neuter))))
+
+(defn get-last-word 
+  "Extracts the last valid word from the text immediately preceding the cursor."
+  [text]
+  (if (str/blank? text)
+    ""
+    (-> text
+        (str/trim)
+        (str/replace #"᠂" " ")
+        (str/replace #"᠃" " ")
+        (str/replace #"\*" " ")
+        (str/replace #"\[" " ")
+        (str/split #"[\s\n\u202F]+")
+        last
+        str/trim)))
+
+(defn- build-suffix-candidates-for-word 
+  "Internal helper to generate all possible suffixes matching the word's gender."
+  [word gender]
+  (let [last-char (if (empty? word) 0 (int (last word)))]
+    [(code.Suffix/yinUnU gender last-char)
+     (code.Suffix/tuDu gender last-char)
+     (code.Suffix/taganDagan gender last-char)
+     (code.Suffix/taqiDaqi gender last-char)
+     (code.Suffix/yiI last-char)
+     (code.Suffix/barIyar gender last-char)
+     (code.Suffix/banIyan gender last-char)
+     (code.Suffix/achaEche gender)
+     (code.Suffix/taiTei gender)
+     (code.Suffix/uu gender)
+     (code.Suffix/ud gender)
+     (code.Suffix/suffixNugud gender)
+     (code.Suffix/suffixChu gender)]))
+
+(defn get-suffix-candidates 
+  "Pure function to get a list of grammatical suffixes.
+   Expects a string containing the text immediately before the cursor."
+  [text-before-cursor]
+  (if (empty? text-before-cursor)
+    suffix-candidates-for-full
+    (let [last-word (get-last-word text-before-cursor)]
+      (if (empty? last-word)
+        suffix-candidates-for-full
+        (if (is-mongolian? (int (last last-word)))
+          (let [gender (get-gender last-word)
+                candidates (build-suffix-candidates-for-word last-word gender)]
+            (vec (remove nil? candidates)))
+          suffix-candidates-for-full)))))

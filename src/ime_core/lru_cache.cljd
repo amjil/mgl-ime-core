@@ -1,0 +1,31 @@
+(ns ime-core.lru-cache)
+
+;; Maximum cache entries, can be adjusted based on actual memory
+(defonce max-cache-size 1000)
+
+;; LRU cache structure: {:map {key candidates}, :order [key1 key2 ...]}
+(defonce lru-cache (atom {:map {} :order []}))
+
+(defn lru-get [key]
+  (let [{:keys [map]} @lru-cache
+        value (get map key)]
+    (when value
+      ;; Update access order: move key to the end
+      (swap! lru-cache update :order
+             (fn [o] (-> (remove #(= % key) o) vec (conj key)))))
+    value))
+
+(defn lru-put [key value]
+  (swap! lru-cache
+         (fn [{:keys [map order]}]
+           (let [new-map (assoc map key value)
+                 new-order (conj (vec (remove #(= % key) order)) key)]
+             ;; Exceed capacity, remove the oldest
+             (if (> (count new-order) max-cache-size)
+               (let [oldest (first new-order)]
+                 {:map (dissoc new-map oldest)
+                  :order (vec (rest new-order))})
+               {:map new-map :order new-order})))))
+
+(defn clear-cache []
+  (reset! lru-cache {:map {} :order []}))
