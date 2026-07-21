@@ -161,14 +161,12 @@
   (if (str/blank? text)
     ""
     (-> text
-        (str/trim)
         (str/replace #"᠂" " ")
         (str/replace #"᠃" " ")
         (str/replace #"\*" " ")
         (str/replace #"\[" " ")
         (str/split #"[\s\n\u202F]+")
-        last
-        str/trim)))
+        last)))
 
 (defn- build-suffix-candidates-for-word 
   "Internal helper to generate all possible suffixes matching the word's gender."
