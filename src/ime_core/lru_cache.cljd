@@ -6,21 +6,35 @@
 ;; LRU cache structure: {:map {key candidates}, :order [key1 key2 ...]}
 (defonce lru-cache (atom {:map {} :order []}))
 
-(defn lru-get [key]
-  (let [{:keys [map]} @lru-cache
-        value (get map key)]
-    (when value
-      ;; Update access order: move key to the end
-      (swap! lru-cache update :order
-             (fn [o] (-> (remove #(= % key) o) vec (conj key)))))
-    value))
+(defn cache-key
+  "Namespaces cache keys so local/remote/next-word results cannot collide."
+  [ns key]
+  (str ns ":" key))
+
+(defn- touch-order [order key]
+  (conj (vec (remove #(= % key) order)) key))
+
+(defn lru-get
+  "Returns the cached value (including an empty vector) or nil on miss.
+   Updates recency atomically with the lookup."
+  [key]
+  (let [hit? (volatile! false)
+        found (volatile! nil)]
+    (swap! lru-cache
+           (fn [{:keys [map order] :as cache}]
+             (if (contains? map key)
+               (do
+                 (vreset! hit? true)
+                 (vreset! found (get map key))
+                 {:map map :order (touch-order order key)})
+               cache)))
+    (when @hit? @found)))
 
 (defn lru-put [key value]
   (swap! lru-cache
          (fn [{:keys [map order]}]
            (let [new-map (assoc map key value)
-                 new-order (conj (vec (remove #(= % key) order)) key)]
-             ;; Exceed capacity, remove the oldest
+                 new-order (touch-order order key)]
              (if (> (count new-order) max-cache-size)
                (let [oldest (first new-order)]
                  {:map (dissoc new-map oldest)

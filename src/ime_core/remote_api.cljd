@@ -5,8 +5,10 @@
    [clojure.string :as str]
    [ime-core.lru-cache :as lru]))
 
+(def ^:private request-timeout-ms 8000)
+
 ;; Global configuration, injected by the main program at initialization.
-(defonce !config 
+(defonce !config
   (atom {:base-url ""
          :candidate-api-path ""
          :next-word-api-path ""}))
@@ -26,57 +28,56 @@
 
 (defn ^:async post-word-json [uri key]
   (await
-   (http/post
-    uri
-    .headers {"Content-Type" "application/json; charset=UTF-8"}
-    .body (convert/jsonEncode {"word" key}))))
+   (-> (http/post
+        uri
+        .headers {"Content-Type" "application/json; charset=UTF-8"}
+        .body (convert/jsonEncode {"word" key}))
+       (.timeout (dart:core/Duration .milliseconds request-timeout-ms)))))
 
-(defn extract-json-array-text [body field-name]
-  (let [pattern (re-pattern (str "\"" field-name "\"\\s*:\\s*(\\[[^\\]]*\\])"))]
-    (if-let [[_ array-text] (re-find pattern body)]
-      array-text
-      "[]")))
+(defn- item-text [item]
+  (if (string? item)
+    item
+    (when item
+      (let [x (first item)]
+        (when (string? x) x)))))
 
-(defn parse-string-array-from-json-text [array-text]
-  (vec
-   (map second
-        (re-seq #"\"((?:\\.|[^\"])*)\"" array-text))))
+(defn parse-string-list
+  "Decodes a JSON object and returns the named field as a vector of strings."
+  [body field-name]
+  (try
+    (let [decoded (convert/jsonDecode body)
+          raw (get decoded field-name)]
+      (if (nil? raw)
+        []
+        (->> raw
+             (map item-text)
+             (filter #(and (string? %) (not (str/blank? %))))
+             vec)))
+    (catch Exception _
+      [])))
 
-(defn ^:async get-candidates-remote [key]
+(defn- ^:async fetch-word-list [cache-ns api-path-key field-name key]
   (if (str/blank? key)
     []
-    (let [cached (lru/lru-get key)]
-      (if (and cached (not (empty? cached)))
+    (let [ck (lru/cache-key cache-ns key)
+          cached (lru/lru-get ck)]
+      (if (some? cached)
         cached
         (try
-          (let [uri (build-uri :candidate-api-path)
-                _ (dart:core/print (str "[remote-api] candidate request uri=" (.toString uri) ", word=" key))
+          (let [uri (build-uri api-path-key)
                 result (await (post-word-json uri key))
                 status (.-statusCode result)]
             (if (= status 200)
-              (let [body (.-body result)
-                    candidates-json (extract-json-array-text body "candidates")
-                    candidates (parse-string-array-from-json-text candidates-json)]
-                (when-not (empty? candidates)
-                  (lru/lru-put key candidates))
-                candidates)
+              (let [words (parse-string-list (.-body result) field-name)]
+                (lru/lru-put ck words)
+                words)
               []))
           (catch Exception e
-            (dart:core/print (str "[remote-api] candidate request error: " e))
+            (dart:core/print (str "[remote-api] request error: " e))
             []))))))
 
+(defn ^:async get-candidates-remote [key]
+  (await (fetch-word-list "remote" :candidate-api-path "candidates" key)))
+
 (defn ^:async get-next-words-remote [key]
-  (if (str/blank? key)
-    []
-    (try
-      (let [uri (build-uri :next-word-api-path)
-            result (await (post-word-json uri key))
-            status (.-statusCode result)]
-        (if (= status 200)
-          (let [body (.-body result)
-                next-words-json (extract-json-array-text body "nextWords")]
-            (parse-string-array-from-json-text next-words-json))
-          []))
-      (catch Exception e
-        (dart:core/print (str "[remote-api] next-word request error: " e))
-        []))))
+  (await (fetch-word-list "next" :next-word-api-path "nextWords" key)))

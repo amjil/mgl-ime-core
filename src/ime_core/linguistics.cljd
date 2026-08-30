@@ -8,7 +8,7 @@
 ;; ==========================================
 
 (def all-suffixes
-  [code.Suffix/YIN 
+  [code.Suffix/YIN
    code.Suffix/UN code.Suffix/UEN
    code.Suffix/U code.Suffix/UE
    code.Suffix/I code.Suffix/YI
@@ -22,13 +22,13 @@
    code.Suffix/BAR code.Suffix/BER
    code.Suffix/IYAR code.Suffix/IYER
    code.Suffix/TAI code.Suffix/TEI
-   code.Suffix/LUGA code.Suffix/LUEGE 
+   code.Suffix/LUGA code.Suffix/LUEGE
    code.Suffix/BAN code.Suffix/BEN
-   code.Suffix/IYAN code.Suffix/IYEN 
-   code.Suffix/YUGAN code.Suffix/YUEGEN 
-   code.Suffix/DAGAN code.Suffix/DEGEN 
-   code.Suffix/TAGAN code.Suffix/TEGEN 
-   code.Suffix/ACHAGAN code.Suffix/ECHEGEN 
+   code.Suffix/IYAN code.Suffix/IYEN
+   code.Suffix/YUGAN code.Suffix/YUEGEN
+   code.Suffix/DAGAN code.Suffix/DEGEN
+   code.Suffix/TAGAN code.Suffix/TEGEN
+   code.Suffix/ACHAGAN code.Suffix/ECHEGEN
    code.Suffix/UD code.Suffix/UED
    code.Suffix/NUGUD code.Suffix/NUEGUED
    code.Suffix/NAR code.Suffix/NER
@@ -36,48 +36,33 @@
    code.Suffix/DA code.Suffix/DE
    code.Suffix/CHU code.Suffix/CHUE])
 
-(def suffix-candidates-for-full
-  [code.Suffix/YIN 
-   code.Suffix/UN
-   code.Suffix/U 
-   code.Suffix/I 
-   code.Suffix/YI
-   code.Suffix/DU code.Suffix/TU
-   code.Suffix/DUR code.Suffix/TUR 
-   code.Suffix/DAQI code.Suffix/TAQI
-   code.Suffix/ACHA
-   code.Suffix/BAR code.Suffix/IYAR
-   code.Suffix/TAI 
-   code.Suffix/LUGA code.Suffix/LUEGE 
-   code.Suffix/BAN code.Suffix/IYEN 
-   code.Suffix/YUGAN code.Suffix/YUEGEN 
-   code.Suffix/DAGAN code.Suffix/DEGEN 
-   code.Suffix/TAGAN code.Suffix/TEGEN 
-   code.Suffix/ACHAGAN code.Suffix/ECHEGEN 
-   code.Suffix/UD 
-   code.Suffix/NUGUD code.Suffix/NUEGUED
-   code.Suffix/NAR 
-   code.Suffix/UU 
-   code.Suffix/DA 
-   code.Suffix/CHU])
+(def ^:private nnbsp 0x202F)
+(def ^:private fvs-or-mvs
+  #{0x180B 0x180C 0x180D 0x180E 0x180F})
 
 ;; ==========================================
 ;; 2. Character & String Analysis
 ;; ==========================================
 
-(defn is-mongolian? 
+(defn is-mongolian-letter?
+  "True only for Mongolian letters (A–CHI), not NNBSP / MVS / FVS."
+  [char-code]
+  (and (some? char-code)
+       (>= char-code code/Mongol.a)
+       (<= char-code code/Mongol.chi)))
+
+(defn is-mongolian?
   "Checks if a given character code is a Mongolian letter or control character."
   [char-code]
   (if (nil? char-code)
     false
-    (or (and (>= char-code code/Mongol.a)
-             (<= char-code code/Mongol.chi))
+    (or (is-mongolian-letter? char-code)
         (and (>= char-code code/Mongol.nirugu)
              (<= char-code code/Mongol.mvs))
-        (= char-code 0x202F) ;; NNBSP
-        (= char-code 0x180E)))) ;; MVS
+        (= char-code nnbsp)
+        (= char-code 0x180E))))
 
-(defn is-mvs-preceding-char? 
+(defn is-mvs-preceding-char?
   "Checks if a character code typically precedes the Mongolian Vowel Separator (MVS)."
   [char-code]
   (if (nil? char-code)
@@ -90,7 +75,7 @@
         (= char-code code/Mongol.u)  (= char-code code/Mongol.oe)
         (= char-code code/Mongol.ue))))
 
-(defn is-vowel? 
+(defn is-vowel?
   "Checks if a character code represents a Mongolian vowel."
   [char-code]
   (if (nil? char-code)
@@ -98,46 +83,63 @@
     (and (>= char-code code/Mongol.a)
          (<= char-code code/Mongol.ee))))
 
+(defn- char-code-at [s i]
+  (.codeUnitAt s i))
+
+(defn- joining-mongolian-from-end?
+  "True if a cursive-joining Mongolian letter precedes the cursor.
+   FVS/MVS attach to the letter and are skipped; NNBSP breaks joining."
+  [s]
+  (if (or (nil? s) (zero? (count s)))
+    false
+    (loop [i (dec (count s))]
+      (if (neg? i)
+        false
+        (let [c (char-code-at s i)]
+          (cond
+            (= c nnbsp) false
+            (contains? fvs-or-mvs c) (recur (dec i))
+            (is-mongolian-letter? c) true
+            :else false))))))
+
+(defn- joining-mongolian-from-start?
+  "True if a cursive-joining Mongolian letter follows the cursor.
+   FVS/MVS are skipped; NNBSP breaks joining."
+  [s]
+  (if (or (nil? s) (zero? (count s)))
+    false
+    (loop [i 0]
+      (if (>= i (count s))
+        false
+        (let [c (char-code-at s i)]
+          (cond
+            (= c nnbsp) false
+            (contains? fvs-or-mvs c) (recur (inc i))
+            (is-mongolian-letter? c) true
+            :else false))))))
+
 ;; ==========================================
 ;; 3. Context & Location (Init, Medi, Fina, Isol)
 ;; ==========================================
 
-(defn get-location 
-  "Determines the positional variant (Isolated, Initial, Medial, Final) 
+(defn get-location
+  "Determines the positional variant (Isolated, Initial, Medial, Final)
    based on surrounding text context."
   [before after]
-  (cond
-    (empty? before) code.Location/isol
-    
-    (and (some? before)
-         (is-mongolian? (last (map int before)))
-         (empty? after)) 
-    code.Location/medi
-
-    (and (some? before)
-         (is-mongolian? (last (map int before)))
-         (some? after)
-         (is-mongolian? (first (map int after))))
-    code.Location/medi
-
-    (and (some? before)
-         (not (is-mongolian? (last (map int before))))
-         (some? after)
-         (is-mongolian? (first (map int after))))
-    code.Location/init
-
-    (and (some? before)
-         (is-mongolian? (last (map int before))))
-    code.Location/fina
-
-    :else code.Location/isol))
+  (let [prev? (joining-mongolian-from-end? before)
+        next? (joining-mongolian-from-start? after)]
+    (cond
+      (and prev? next?) code.Location/medi
+      prev? code.Location/fina
+      next? code.Location/init
+      :else code.Location/isol)))
 
 ;; ==========================================
 ;; 4. Word Extraction & Suffix Logic
 ;; ==========================================
 
-(defn get-gender 
-  "Calculates the gender (Masculine, Feminine, or Neuter) of a Mongolian word 
+(defn get-gender
+  "Calculates the gender (Masculine, Feminine, or Neuter) of a Mongolian word
    based on vowel harmony."
   [word]
   (let [vowel-char (first (filter #(and (is-vowel? %)
@@ -155,20 +157,23 @@
         :else
         code/Gender.neuter))))
 
-(defn get-last-word 
-  "Extracts the last valid word from the text immediately preceding the cursor."
+(defn get-last-word
+  "Extracts the last valid word from the text immediately preceding the cursor.
+   NNBSP (U+202F) is treated as a word break, matching suffix separators."
   [text]
   (if (str/blank? text)
     ""
-    (-> text
-        (str/replace #"᠂" " ")
-        (str/replace #"᠃" " ")
-        (str/replace #"\*" " ")
-        (str/replace #"\[" " ")
-        (str/split #"[\s\n\u202F]+")
-        last)))
+    (or (-> text
+            (str/replace #"᠂" " ")
+            (str/replace #"᠃" " ")
+            (str/replace #"\*" " ")
+            (str/replace #"\[" " ")
+            (str/replace #"\]" " ")
+            (str/split #"[\s\n\u202F]+")
+            last)
+        "")))
 
-(defn- build-suffix-candidates-for-word 
+(defn- build-suffix-candidates-for-word
   "Internal helper to generate all possible suffixes matching the word's gender."
   [word gender]
   (let [last-char (if (empty? word) 0 (int (last word)))]
@@ -186,17 +191,17 @@
      (code.Suffix/suffixNugud gender)
      (code.Suffix/suffixChu gender)]))
 
-(defn get-suffix-candidates 
+(defn get-suffix-candidates
   "Pure function to get a list of grammatical suffixes.
    Expects a string containing the text immediately before the cursor."
   [text-before-cursor]
   (if (empty? text-before-cursor)
-    suffix-candidates-for-full
+    all-suffixes
     (let [last-word (get-last-word text-before-cursor)]
       (if (empty? last-word)
-        suffix-candidates-for-full
-        (if (is-mongolian? (int (last last-word)))
+        all-suffixes
+        (if (is-mongolian-letter? (int (last last-word)))
           (let [gender (get-gender last-word)
                 candidates (build-suffix-candidates-for-word last-word gender)]
             (vec (remove nil? candidates)))
-          suffix-candidates-for-full)))))
+          all-suffixes)))))

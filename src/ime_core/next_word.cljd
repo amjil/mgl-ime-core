@@ -4,26 +4,44 @@
    [ime-core.asset-loader :as loader]
    [ime-core.remote-api :as remote]))
 
-;; 1. Global state for local prediction dictionary
 (defonce !next-dict (atom nil))
+(defonce !load-future (atom nil))
 
-;; 2. Preload prediction dictionary on startup (Local mode)
+(defn ^:async load-next-dict []
+  (try
+    (await (loader/load-assets-parallel [[!next-dict "assets/next.zip"]]))
+    true
+    (catch Exception e
+      (reset! !load-future nil)
+      (reset! !next-dict nil)
+      (throw e))))
+
 (defn ^:async ensure-loaded []
   (when (nil? @!next-dict)
-    (await (loader/load-assets-parallel [[!next-dict "assets/next.zip"]]))))
+    (loop []
+      (let [cur @!load-future]
+        (if cur
+          (await cur)
+          (let [fut (load-next-dict)]
+            (if (compare-and-set! !load-future nil fut)
+              (await fut)
+              (recur))))))))
 
-;; 3. Local prediction lookup logic
+(defn- pred-word [item]
+  (if (string? item)
+    item
+    (when item
+      (first item))))
+
 (defn- get-local-predictions [prev-word]
   (if-let [raw-preds (get @!next-dict prev-word)]
-    ;; Extract and filter the first element of nested lists
     (->> raw-preds
-         (filter #(not (nil? (first %))))
-         (map first)
+         (map pred-word)
+         (filter #(and (string? %) (not (str/blank? %))))
          vec)
     []))
 
-;; 4. Unified facade for next-word predictions
-(defn ^:async get-predictions-async 
+(defn ^:async get-predictions-async
   "Unified entry point for retrieving next-word candidates.
    Determines whether to query the remote API or the local dictionary based on config."
   [prev-word {:keys [use-remote?] :or {use-remote? false}}]

@@ -1,5 +1,6 @@
 (ns ime-core.fst-engine
   (:require
+   ["dart:async" :as async]
    ["dart:typed_data" :as u]
    ["package:flutter/services.dart" :refer [rootBundle]]
    ["dart:convert" :as convert]
@@ -9,50 +10,73 @@
 ;; -----------------------------
 ;; Utility & Binary Parsing
 ;; -----------------------------
+(defn- as-uint8 [^u/ByteData bd]
+  (.asUint8List (.-buffer bd) (.-offsetInBytes bd) (.-lengthInBytes bd)))
+
 (defn read-u32 [^u/ByteData buf offset]
-  (.getUint32 buf offset u/Endian.little))
+  (when (and buf (some? offset) (>= offset 0)
+             (<= (+ offset 4) (.-lengthInBytes buf)))
+    (.getUint32 buf offset u/Endian.little)))
 
 (defn read-u64 [^u/ByteData buf offset]
-  (.getUint64 buf offset u/Endian.little))
+  (when (and buf (some? offset) (>= offset 0)
+             (<= (+ offset 8) (.-lengthInBytes buf)))
+    (.getUint64 buf offset u/Endian.little)))
 
 (defn ^:async load-token-table [path]
   (let [byte-data (await (.load rootBundle path))
-        count (read-u32 byte-data 0)
+        raw-count (or (read-u32 byte-data 0) 0)
+        max-count (max 0 (quot (- (.-lengthInBytes byte-data) 4) 4))
+        count (min raw-count max-count)
         tokens (loop [i 0 acc []]
                  (if (< i count)
-                   (recur (inc i) (conj acc (char (read-u32 byte-data (+ 4 (* i 4))))))
+                   (let [cp (read-u32 byte-data (+ 4 (* i 4)))]
+                     (recur (inc i) (conj acc (if cp (char cp) \?))))
                    acc))]
     {:tokens tokens
      :token->char (into {} (map vector (range 0 count) tokens))}))
 
-(defn ^:async load-dict [bin-path idx-path]
-  (let [bin-data (await (.load rootBundle bin-path))
-        idx-data (await (.load rootBundle idx-path))
-        count (/ (.-lengthInBytes idx-data) 8)]
+(defn ^:async load-bin-idx [bin-path idx-path]
+  (let [loaded (await (async/Future.wait
+                       [(.load rootBundle bin-path)
+                        (.load rootBundle idx-path)]))
+        bin-data (nth loaded 0)
+        idx-data (nth loaded 1)
+        count (quot (.-lengthInBytes idx-data) 8)]
     {:bin bin-data :idx idx-data :count count}))
+
+(def load-dict load-bin-idx)
+(def load-lists load-bin-idx)
 
 (defn dict-get-word [dict word-id token->char]
-  (let [offset (read-u64 (:idx dict) (* 8 word-id))
-        len (read-u32 (:bin dict) offset)
-        bin-uint8 (.asUint8List (.-buffer ^u/ByteData (:bin dict)))
-        bytes (.sublist bin-uint8 (+ offset 4) (+ offset 4 len))
-        sb (dart:core/StringBuffer.)]
-    (doseq [b bytes]
-      (.write sb (get token->char b "?")))
-    (.toString sb)))
-
-(defn ^:async load-lists [bin-path idx-path]
-  (let [bin-data (await (.load rootBundle bin-path))
-        idx-data (await (.load rootBundle idx-path))
-        count (/ (.-lengthInBytes idx-data) 8)]
-    {:bin bin-data :idx idx-data :count count}))
+  (let [cnt (:count dict)]
+    (when (and (some? word-id) (some? cnt)
+               (>= word-id 0) (< word-id cnt))
+      (let [offset (read-u64 (:idx dict) (* 8 word-id))
+            len (when offset (read-u32 (:bin dict) offset))]
+        (when (and offset len (>= len 0))
+          (let [bin-uint8 (as-uint8 ^u/ByteData (:bin dict))
+                start (+ offset 4)
+                end (+ start len)]
+            (when (and (>= start 0) (<= end (.-length bin-uint8)))
+              (let [bytes (.sublist bin-uint8 start end)
+                    sb (dart:core/StringBuffer.)]
+                (doseq [b bytes]
+                  (.write sb (get token->char b "?")))
+                (.toString sb)))))))))
 
 (defn lists-get-word-ids [lists key-id]
-  (let [offset (read-u64 (:idx lists) (* 8 key-id))
-        count (read-u32 (:bin lists) offset)
-        word-ids (vec (for [i (range count)]
-                        (read-u32 (:bin lists) (+ offset 4 (* i 4)))))]
-    word-ids))
+  (let [cnt (:count lists)]
+    (if-not (and (some? key-id) (some? cnt)
+                 (>= key-id 0) (< key-id cnt))
+      []
+      (let [offset (read-u64 (:idx lists) (* 8 key-id))
+            n (when offset (read-u32 (:bin lists) offset))]
+        (if-not (and offset n (>= n 0))
+          []
+          (vec (keep (fn [i]
+                       (read-u32 (:bin lists) (+ offset 4 (* i 4))))
+                     (range n))))))))
 
 (defn ^:async load-keys [path]
   (let [str-data (await (.loadString rootBundle path))
@@ -66,17 +90,17 @@
 ;; Core Query Logic
 ;; -----------------------------
 (defn get-local-candidates [key keys-map lists dict token-table]
-  (if-let [cached (lru/lru-get key)]
-    cached
-    (let [key-id (keys-get-id keys-map key)]
-      (if (nil? key-id)
-        []
-        (let [word-ids (lists-get-word-ids lists key-id)
-              token->char (:token->char token-table)
-              candidates (vec (map #(dict-get-word dict % token->char) word-ids))]
-          (when-not (empty? candidates)
-            (lru/lru-put key candidates))
-          candidates)))))
+  (let [ck (lru/cache-key "local" key)]
+    (if-let [cached (lru/lru-get ck)]
+      cached
+      (let [key-id (keys-get-id keys-map key)
+            candidates (if (nil? key-id)
+                         []
+                         (let [word-ids (lists-get-word-ids lists key-id)
+                               token->char (:token->char token-table)]
+                           (vec (keep #(dict-get-word dict % token->char) word-ids))))]
+        (lru/lru-put ck candidates)
+        candidates))))
 
 ;; -----------------------------
 ;; Global State & Facade
@@ -85,18 +109,44 @@
 (defonce !dict (atom nil))
 (defonce !lists (atom nil))
 (defonce !keys-map (atom nil))
+(defonce !load-future (atom nil))
+
+(defn- resources-ready? []
+  (and (some? @!token-table) (some? @!dict)
+       (some? @!lists) (some? @!keys-map)))
+
+(defn ^:async load-all-resources []
+  (try
+    (let [loaded (await (async/Future.wait
+                         [(load-token-table "assets/fst/token_table.bin")
+                          (load-bin-idx "assets/fst/dict.bin" "assets/fst/dict.idx")
+                          (load-bin-idx "assets/fst/lists.bin" "assets/fst/lists.idx")
+                          (load-keys "assets/fst/keys.json")]))]
+      (reset! !token-table (nth loaded 0))
+      (reset! !dict (nth loaded 1))
+      (reset! !lists (nth loaded 2))
+      (reset! !keys-map (nth loaded 3))
+      true)
+    (catch Exception e
+      (reset! !load-future nil)
+      (reset! !token-table nil)
+      (reset! !dict nil)
+      (reset! !lists nil)
+      (reset! !keys-map nil)
+      (throw e))))
 
 (defn ^:async ensure-loaded []
-  (when (nil? @!token-table)
-    (reset! !token-table (await (load-token-table "assets/fst/token_table.bin"))))
-  (when (nil? @!dict)
-    (reset! !dict (await (load-dict "assets/fst/dict.bin" "assets/fst/dict.idx"))))
-  (when (nil? @!lists)
-    (reset! !lists (await (load-lists "assets/fst/lists.bin" "assets/fst/lists.idx"))))
-  (when (nil? @!keys-map)
-    (reset! !keys-map (await (load-keys "assets/fst/keys.json")))))
+  (when-not (resources-ready?)
+    (loop []
+      (let [cur @!load-future]
+        (if cur
+          (await cur)
+          (let [fut (load-all-resources)]
+            (if (compare-and-set! !load-future nil fut)
+              (await fut)
+              (recur))))))))
 
-(defn ^:async get-candidates-async 
+(defn ^:async get-candidates-async
   "Unified query entry point; callers choose remote or local mode."
   [key {:keys [use-remote?] :or {use-remote? false}}]
   (if use-remote?
