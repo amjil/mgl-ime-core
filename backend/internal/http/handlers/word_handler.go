@@ -5,6 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"unicode/utf8"
+)
+
+const (
+	maxRequestBodyBytes = 4096
+	maxWordRunes        = 256
 )
 
 type WordService interface {
@@ -59,14 +65,23 @@ func (h *WordHandler) HandleNextWords(w http.ResponseWriter, r *http.Request) {
 func parseWordRequest(r *http.Request) (string, error) {
 	defer r.Body.Close()
 
+	r.Body = http.MaxBytesReader(nil, r.Body, maxRequestBodyBytes)
+
 	var req wordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return "", errors.New("request body too large")
+		}
 		return "", errors.New("invalid json body")
 	}
 
 	word := strings.TrimSpace(req.Word)
 	if word == "" {
 		return "", errors.New("word is required")
+	}
+	if utf8.RuneCountInString(word) > maxWordRunes {
+		return "", errors.New("word is too long")
 	}
 	return word, nil
 }

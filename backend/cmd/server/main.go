@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	apphttp "m-v-k/backend/internal/http"
 	"m-v-k/backend/internal/http/handlers"
@@ -18,15 +19,21 @@ func main() {
 		port = "3003"
 	}
 
-	workingDir, err := os.Getwd()
+	dataDir, err := resolveDataDir()
 	if err != nil {
-		log.Fatalf("read working directory failed: %v", err)
+		log.Fatalf("resolve data directory failed: %v", err)
 	}
 
-	wordStore, err := store.NewJSONStore(
-		filepath.Join(workingDir, "full.json"),
-		filepath.Join(workingDir, "next.json"),
-	)
+	fullPath, err := resolveDataFile(dataDir, "FULL_JSON", "full.json")
+	if err != nil {
+		log.Fatalf("resolve full json failed: %v", err)
+	}
+	nextPath, err := resolveDataFile(dataDir, "NEXT_JSON", "next.json")
+	if err != nil {
+		log.Fatalf("resolve next json failed: %v", err)
+	}
+
+	wordStore, err := store.NewJSONStore(fullPath, nextPath)
 	if err != nil {
 		log.Fatalf("initialize json store failed: %v", err)
 	}
@@ -36,8 +43,47 @@ func main() {
 	router := apphttp.NewRouter(wordHandler)
 
 	addr := ":" + port
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+
+	log.Printf("loaded word data from %s and %s", fullPath, nextPath)
 	log.Printf("backend server listening on %s", addr)
-	if err := http.ListenAndServe(addr, router); err != nil {
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("server stopped: %v", err)
 	}
+}
+
+func resolveDataDir() (string, error) {
+	if dir := os.Getenv("DATA_DIR"); dir != "" {
+		return dir, nil
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if _, err := store.ResolveDataPath(cwd, "full.json"); err == nil {
+		return cwd, nil
+	}
+
+	nested := filepath.Join(cwd, "backend")
+	if _, err := store.ResolveDataPath(nested, "full.json"); err == nil {
+		return nested, nil
+	}
+
+	return cwd, nil
+}
+
+func resolveDataFile(dir, envName, defaultName string) (string, error) {
+	if path := os.Getenv(envName); path != "" {
+		return path, nil
+	}
+	return store.ResolveDataPath(dir, defaultName)
 }

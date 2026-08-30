@@ -1,9 +1,12 @@
 package store
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -31,89 +34,161 @@ func NewJSONStore(fullJSONPath, nextJSONPath string) (*JSONStore, error) {
 
 func (s *JSONStore) GetCandidates(word string) ([]string, bool) {
 	values, ok := s.candidateMap[word]
-	if !ok {
-		return nil, false
-	}
-	return clone(values), true
+	return values, ok
 }
 
 func (s *JSONStore) GetNextWords(word string) ([]string, bool) {
 	values, ok := s.nextMap[word]
-	if !ok {
-		return nil, false
+	return values, ok
+}
+
+// ResolveDataPath finds name in dir, falling back to name+".gz".
+func ResolveDataPath(dir, name string) (string, error) {
+	candidates := []string{filepath.Join(dir, name)}
+	if !strings.HasSuffix(strings.ToLower(name), ".gz") {
+		candidates = append(candidates, filepath.Join(dir, name+".gz"))
 	}
-	return clone(values), true
+
+	for _, path := range candidates {
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			return path, nil
+		}
+	}
+
+	return "", fmt.Errorf("data file %q not found in %s (tried %s)", name, dir, strings.Join(candidates, ", "))
 }
 
 func loadWordMap(path string) (map[string][]string, error) {
-	file, err := os.Open(path)
+	reader, err := openMaybeGzip(path)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer reader.Close()
 
-	decoder := json.NewDecoder(file)
-	raw := map[string]any{}
-	if err := decoder.Decode(&raw); err != nil {
+	decoder := json.NewDecoder(reader)
+	tok, err := decoder.Token()
+	if err != nil {
 		return nil, err
 	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return nil, fmt.Errorf("expected JSON object, got %v", tok)
+	}
 
-	out := make(map[string][]string, len(raw))
-	for key, value := range raw {
-		words, err := normalizeWordList(value)
+	out := make(map[string][]string)
+	for decoder.More() {
+		keyTok, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return nil, fmt.Errorf("expected string key, got %T", keyTok)
+		}
+
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return nil, fmt.Errorf("decode key %q: %w", key, err)
+		}
+
+		words, err := parseWordList(raw)
 		if err != nil {
 			return nil, fmt.Errorf("decode key %q: %w", key, err)
 		}
 		out[key] = words
 	}
 
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+
 	return out, nil
 }
 
-func normalizeWordList(value any) ([]string, error) {
-	items, ok := value.([]any)
-	if !ok {
-		return nil, fmt.Errorf("expected list, got %T", value)
+func parseWordList(raw json.RawMessage) ([]string, error) {
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("expected list: %w", err)
 	}
 
 	words := make([]string, 0, len(items))
 	for _, item := range items {
-		switch entry := item.(type) {
-		case string:
-			word := strings.TrimSpace(entry)
-			if word == "" {
-				continue
-			}
-			words = append(words, word)
-		case []any:
-			// Support format like: ["word", 0.123]
-			if len(entry) == 0 {
-				continue
-			}
-			word, ok := entry[0].(string)
-			if !ok {
-				// Some source rows contain invalid/null first column; skip them.
-				continue
-			}
+		if word, ok := unmarshalJSONString(item); ok {
 			word = strings.TrimSpace(word)
-			if word == "" {
-				continue
+			if word != "" {
+				words = append(words, word)
 			}
-			words = append(words, word)
-		default:
-			// Skip invalid item and keep loading remaining rows.
 			continue
+		}
+
+		var tuple []json.RawMessage
+		if err := json.Unmarshal(item, &tuple); err != nil || len(tuple) == 0 {
+			continue
+		}
+		word, ok := unmarshalJSONString(tuple[0])
+		if !ok {
+			continue
+		}
+		word = strings.TrimSpace(word)
+		if word != "" {
+			words = append(words, word)
 		}
 	}
 
 	return words, nil
 }
 
-func clone(values []string) []string {
-	if len(values) == 0 {
-		return []string{}
+func unmarshalJSONString(raw json.RawMessage) (string, bool) {
+	var word string
+	if err := json.Unmarshal(raw, &word); err != nil {
+		return "", false
 	}
-	out := make([]string, len(values))
-	copy(out, values)
-	return out
+	return word, true
+}
+
+func openMaybeGzip(path string) (io.ReadCloser, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var header [2]byte
+	n, err := file.Read(header[:])
+	if err != nil && err != io.EOF {
+		file.Close()
+		return nil, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		file.Close()
+		return nil, err
+	}
+
+	if n == 2 && header[0] == 0x1f && header[1] == 0x8b {
+		gz, err := gzip.NewReader(file)
+		if err != nil {
+			file.Close()
+			return nil, err
+		}
+		return &gzipReadCloser{gz: gz, file: file}, nil
+	}
+
+	return file, nil
+}
+
+type gzipReadCloser struct {
+	gz   *gzip.Reader
+	file *os.File
+}
+
+func (c *gzipReadCloser) Read(p []byte) (int, error) {
+	return c.gz.Read(p)
+}
+
+func (c *gzipReadCloser) Close() error {
+	err := c.gz.Close()
+	if closeErr := c.file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }

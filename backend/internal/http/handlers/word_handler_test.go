@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -101,5 +102,54 @@ func TestHandleNextWordsSuccess(t *testing.T) {
 	}
 	if len(resp["nextWords"]) != 2 {
 		t.Fatalf("unexpected nextWords length: %d", len(resp["nextWords"]))
+	}
+}
+
+func TestHandleCandidatesInvalidJSON(t *testing.T) {
+	handler := NewWordHandler(&mockWordService{})
+	req := httptest.NewRequest(http.MethodPost, "/api/next_word/candidates", bytes.NewBufferString(`{`))
+	rec := httptest.NewRecorder()
+
+	handler.HandleCandidates(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleCandidatesWordTooLong(t *testing.T) {
+	handler := NewWordHandler(&mockWordService{})
+	word := make([]byte, 0, maxWordRunes+1)
+	for i := 0; i < maxWordRunes+1; i++ {
+		word = append(word, 'a')
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/next_word/candidates", bytes.NewBufferString(`{"word":"`+string(word)+`"}`))
+	rec := httptest.NewRecorder()
+
+	handler.HandleCandidates(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleCandidatesBodyTooLarge(t *testing.T) {
+	handler := NewWordHandler(&mockWordService{})
+	body := `{"word":"` + strings.Repeat("a", maxRequestBodyBytes) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/next_word/candidates", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+
+	handler.HandleCandidates(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if resp["error"] != "request body too large" {
+		t.Fatalf("unexpected error: %#v", resp)
 	}
 }

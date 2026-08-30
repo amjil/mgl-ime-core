@@ -1,6 +1,9 @@
 package word
 
-import "sync"
+import (
+	"container/list"
+	"sync"
+)
 
 type Store interface {
 	GetCandidates(word string) ([]string, bool)
@@ -23,29 +26,24 @@ func NewService(store Store, cacheCapacity int) *Service {
 }
 
 func (s *Service) GetCandidates(word string) ([]string, error) {
-	if cached, ok := s.cache.get("c:" + word); ok {
-		return cached, nil
-	}
-
-	words, ok := s.store.GetCandidates(word)
-	if !ok {
-		words = []string{}
-	}
-	s.cache.put("c:"+word, words)
-	return cloneSlice(words), nil
+	return s.lookup("c:"+word, word, s.store.GetCandidates), nil
 }
 
 func (s *Service) GetNextWords(word string) ([]string, error) {
-	if cached, ok := s.cache.get("n:" + word); ok {
-		return cached, nil
+	return s.lookup("n:"+word, word, s.store.GetNextWords), nil
+}
+
+func (s *Service) lookup(cacheKey, word string, load func(string) ([]string, bool)) []string {
+	if cached, ok := s.cache.get(cacheKey); ok {
+		return cached
 	}
 
-	words, ok := s.store.GetNextWords(word)
+	words, ok := load(word)
 	if !ok {
 		words = []string{}
 	}
-	s.cache.put("n:"+word, words)
-	return cloneSlice(words), nil
+	s.cache.put(cacheKey, words)
+	return cloneSlice(words)
 }
 
 func cloneSlice(values []string) []string {
@@ -57,45 +55,62 @@ func cloneSlice(values []string) []string {
 	return out
 }
 
+type cacheEntry struct {
+	key   string
+	value []string
+}
+
 type resultCache struct {
-	mu       sync.RWMutex
-	order    []string
-	data     map[string][]string
+	mu       sync.Mutex
+	ll       *list.List
+	items    map[string]*list.Element
 	capacity int
 }
 
 func newResultCache(capacity int) *resultCache {
+	if capacity <= 0 {
+		capacity = 1
+	}
 	return &resultCache{
-		order:    make([]string, 0, capacity),
-		data:     make(map[string][]string, capacity),
+		ll:       list.New(),
+		items:    make(map[string]*list.Element, capacity),
 		capacity: capacity,
 	}
 }
 
 func (c *resultCache) get(key string) ([]string, bool) {
-	c.mu.RLock()
-	value, ok := c.data[key]
-	c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	el, ok := c.items[key]
 	if !ok {
 		return nil, false
 	}
-	return cloneSlice(value), true
+	c.ll.MoveToFront(el)
+	return cloneSlice(el.Value.(*cacheEntry).value), true
 }
 
 func (c *resultCache) put(key string, value []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, exists := c.data[key]; !exists {
-		c.order = append(c.order, key)
-	}
-	c.data[key] = cloneSlice(value)
-
-	if len(c.order) <= c.capacity {
+	cloned := cloneSlice(value)
+	if el, ok := c.items[key]; ok {
+		el.Value.(*cacheEntry).value = cloned
+		c.ll.MoveToFront(el)
 		return
 	}
 
-	oldest := c.order[0]
-	c.order = c.order[1:]
-	delete(c.data, oldest)
+	el := c.ll.PushFront(&cacheEntry{key: key, value: cloned})
+	c.items[key] = el
+	if c.ll.Len() <= c.capacity {
+		return
+	}
+
+	oldest := c.ll.Back()
+	if oldest == nil {
+		return
+	}
+	c.ll.Remove(oldest)
+	delete(c.items, oldest.Value.(*cacheEntry).key)
 }
