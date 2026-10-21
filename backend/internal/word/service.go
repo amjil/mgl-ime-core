@@ -2,7 +2,10 @@ package word
 
 import (
 	"container/list"
+	"errors"
 	"sync"
+
+	"m-v-k/backend/internal/word/mongol"
 )
 
 type Store interface {
@@ -10,9 +13,20 @@ type Store interface {
 	GetNextWords(word string) ([]string, bool)
 }
 
+type UserWordStore interface {
+	Store
+	AddUserWord(keys []string, word string, nextWords []string) error
+}
+
+type UserOverlayGenerationStore interface {
+	UserOverlayGeneration() (uint64, bool)
+}
+
 type Service struct {
-	store Store
-	cache *resultCache
+	store           Store
+	cache           *resultCache
+	userOverlayGen  uint64
+	userOverlaySeen bool
 }
 
 func NewService(store Store, cacheCapacity int) *Service {
@@ -26,11 +40,61 @@ func NewService(store Store, cacheCapacity int) *Service {
 }
 
 func (s *Service) GetCandidates(word string) ([]string, error) {
+	s.syncUserOverlayCache()
 	return s.lookup("c:"+word, word, s.store.GetCandidates), nil
 }
 
 func (s *Service) GetNextWords(word string) ([]string, error) {
+	s.syncUserOverlayCache()
 	return s.lookup("n:"+word, word, s.store.GetNextWords), nil
+}
+
+func (s *Service) syncUserOverlayCache() {
+	genStore, ok := s.store.(UserOverlayGenerationStore)
+	if !ok {
+		return
+	}
+	gen, ok := genStore.UserOverlayGeneration()
+	if !ok {
+		return
+	}
+	if !s.userOverlaySeen {
+		s.userOverlaySeen = true
+		s.userOverlayGen = gen
+		return
+	}
+	if gen != s.userOverlayGen {
+		s.cache.clear()
+		s.userOverlayGen = gen
+	}
+}
+
+func (s *Service) AddUserWord(word string, nextWords []string) error {
+	userStore, ok := s.store.(UserWordStore)
+	if !ok {
+		return errors.New("user dictionary is not configured")
+	}
+
+	keys := mongol.CandidateKeys(word)
+	if len(keys) == 0 {
+		return errors.New("word is required")
+	}
+
+	if err := userStore.AddUserWord(keys, word, nextWords); err != nil {
+		return err
+	}
+
+	for _, key := range keys {
+		s.cache.remove("c:" + key)
+		for _, variant := range mongol.LookupKeyVariants(key) {
+			s.cache.remove("c:" + variant)
+		}
+	}
+	for _, key := range mongol.LookupKeyVariants(word) {
+		s.cache.remove("n:" + key)
+	}
+	s.syncUserOverlayCache()
+	return nil
 }
 
 func (s *Service) lookup(cacheKey, word string, load func(string) ([]string, bool)) []string {
@@ -42,7 +106,9 @@ func (s *Service) lookup(cacheKey, word string, load func(string) ([]string, boo
 	if !ok {
 		words = []string{}
 	}
-	s.cache.put(cacheKey, words)
+	if ok && len(words) > 0 {
+		s.cache.put(cacheKey, words)
+	}
 	return cloneSlice(words)
 }
 
@@ -88,6 +154,26 @@ func (c *resultCache) get(key string) ([]string, bool) {
 	}
 	c.ll.MoveToFront(el)
 	return cloneSlice(el.Value.(*cacheEntry).value), true
+}
+
+func (c *resultCache) remove(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	el, ok := c.items[key]
+	if !ok {
+		return
+	}
+	c.ll.Remove(el)
+	delete(c.items, key)
+}
+
+func (c *resultCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.ll.Init()
+	c.items = make(map[string]*list.Element, c.capacity)
 }
 
 func (c *resultCache) put(key string, value []string) {

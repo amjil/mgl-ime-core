@@ -33,7 +33,16 @@ func main() {
 		log.Fatalf("resolve next json failed: %v", err)
 	}
 
-	wordStore, err := store.NewJSONStore(fullPath, nextPath)
+	userFullPath := filepath.Join(dataDir, "user_full.json")
+	userNextPath := filepath.Join(dataDir, "user_next.json")
+	if path := os.Getenv("USER_FULL_JSON"); path != "" {
+		userFullPath = path
+	}
+	if path := os.Getenv("USER_NEXT_JSON"); path != "" {
+		userNextPath = path
+	}
+
+	wordStore, err := store.NewJSONStoreWithUser(fullPath, nextPath, userFullPath, userNextPath)
 	if err != nil {
 		log.Fatalf("initialize json store failed: %v", err)
 	}
@@ -53,7 +62,7 @@ func main() {
 		MaxHeaderBytes:    16 << 10,
 	}
 
-	log.Printf("loaded word data from %s and %s", fullPath, nextPath)
+	log.Printf("loaded word data from %s and %s (user overlay: %s, %s)", fullPath, nextPath, userFullPath, userNextPath)
 	log.Printf("backend server listening on %s", addr)
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("server stopped: %v", err)

@@ -15,7 +15,9 @@ type mockWordService struct {
 	nextWords      []string
 	candidateErr   error
 	nextWordsErr   error
+	addUserWordErr error
 	receivedWord   string
+	receivedNext   []string
 	receivedForAPI string
 }
 
@@ -29,6 +31,13 @@ func (m *mockWordService) GetNextWords(word string) ([]string, error) {
 	m.receivedWord = word
 	m.receivedForAPI = "next"
 	return m.nextWords, m.nextWordsErr
+}
+
+func (m *mockWordService) AddUserWord(word string, nextWords []string) error {
+	m.receivedWord = word
+	m.receivedNext = nextWords
+	m.receivedForAPI = "add-user-word"
+	return m.addUserWordErr
 }
 
 func TestHandleCandidatesSuccess(t *testing.T) {
@@ -130,6 +139,26 @@ func TestHandleCandidatesWordTooLong(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleAddUserWordSuccess(t *testing.T) {
+	svc := &mockWordService{}
+	handler := NewWordHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/user_words", bytes.NewBufferString(`{"word":"ᠠ","nextWords":["ᠰᠡᠪᠡ","ᠬᠡ"]}`))
+	rec := httptest.NewRecorder()
+
+	handler.HandleAddUserWord(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if svc.receivedWord != "ᠠ" || svc.receivedForAPI != "add-user-word" {
+		t.Fatalf("unexpected service call: word=%q api=%q", svc.receivedWord, svc.receivedForAPI)
+	}
+	if len(svc.receivedNext) != 2 || svc.receivedNext[0] != "ᠰᠡᠪᠡ" || svc.receivedNext[1] != "ᠬᠡ" {
+		t.Fatalf("unexpected nextWords: %#v", svc.receivedNext)
 	}
 }
 

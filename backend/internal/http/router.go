@@ -8,6 +8,7 @@ import (
 type WordHandler interface {
 	HandleCandidates(w http.ResponseWriter, r *http.Request)
 	HandleNextWords(w http.ResponseWriter, r *http.Request)
+	HandleAddUserWord(w http.ResponseWriter, r *http.Request)
 }
 
 func NewRouter(wordHandler WordHandler) http.Handler {
@@ -18,6 +19,7 @@ func NewRouter(wordHandler WordHandler) http.Handler {
 	})
 	mux.HandleFunc("POST /api/next_word/candidates", wordHandler.HandleCandidates)
 	mux.HandleFunc("POST /api/next_word/list", wordHandler.HandleNextWords)
+	mux.HandleFunc("POST /api/user_words", wordHandler.HandleAddUserWord)
 
 	return withCORS(mux)
 }

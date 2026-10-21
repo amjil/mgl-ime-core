@@ -16,6 +16,10 @@ func (stubWordHandler) HandleNextWords(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (stubWordHandler) HandleAddUserWord(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
+
 func TestHealthz(t *testing.T) {
 	router := NewRouter(stubWordHandler{})
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)

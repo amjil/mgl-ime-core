@@ -8,14 +8,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"m-v-k/backend/internal/word/mongol"
 )
 
 type JSONStore struct {
 	candidateMap map[string][]string
 	nextMap      map[string][]string
+	user         *userOverlay
 }
 
 func NewJSONStore(fullJSONPath, nextJSONPath string) (*JSONStore, error) {
+	return NewJSONStoreWithUser(fullJSONPath, nextJSONPath, "", "")
+}
+
+func NewJSONStoreWithUser(fullJSONPath, nextJSONPath, userFullPath, userNextPath string) (*JSONStore, error) {
 	candidateMap, err := loadWordMap(fullJSONPath)
 	if err != nil {
 		return nil, fmt.Errorf("load full json (%s): %w", fullJSONPath, err)
@@ -26,20 +33,77 @@ func NewJSONStore(fullJSONPath, nextJSONPath string) (*JSONStore, error) {
 		return nil, fmt.Errorf("load next json (%s): %w", nextJSONPath, err)
 	}
 
+	var user *userOverlay
+	if userFullPath != "" && userNextPath != "" {
+		user, err = newUserOverlay(userFullPath, userNextPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &JSONStore{
 		candidateMap: candidateMap,
 		nextMap:      nextMap,
+		user:         user,
 	}, nil
 }
 
 func (s *JSONStore) GetCandidates(word string) ([]string, bool) {
-	values, ok := s.candidateMap[word]
-	return values, ok
+	return s.lookupMerged(word, s.candidateMap, func(key string) ([]string, bool) {
+		if s.user == nil {
+			return nil, false
+		}
+		return s.user.getCandidates(key)
+	})
 }
 
 func (s *JSONStore) GetNextWords(word string) ([]string, bool) {
-	values, ok := s.nextMap[word]
-	return values, ok
+	return s.lookupMerged(word, s.nextMap, func(key string) ([]string, bool) {
+		if s.user == nil {
+			return nil, false
+		}
+		return s.user.getNextWords(key)
+	})
+}
+
+func (s *JSONStore) lookupMerged(word string, baseMap map[string][]string, overlayFn func(string) ([]string, bool)) ([]string, bool) {
+	var merged []string
+	found := false
+
+	for _, key := range mongol.LookupKeyVariants(word) {
+		base, baseOK := baseMap[key]
+		var overlay []string
+		overlayOK := false
+		if overlayFn != nil {
+			overlay, overlayOK = overlayFn(key)
+		}
+		if !baseOK && !overlayOK {
+			continue
+		}
+		found = true
+		merged = mergeWordLists(merged, mergeWordLists(base, overlay))
+	}
+
+	if !found {
+		return nil, false
+	}
+	return merged, true
+}
+
+func (s *JSONStore) AddUserWord(keys []string, word string, nextWords []string) error {
+	if s.user == nil {
+		return fmt.Errorf("user dictionary is not configured")
+	}
+	return s.user.addUserWord(keys, word, nextWords)
+}
+
+// UserOverlayGeneration returns a monotonic value that increases whenever user
+// overlay data changes (disk reload or in-process write).
+func (s *JSONStore) UserOverlayGeneration() (uint64, bool) {
+	if s.user == nil {
+		return 0, false
+	}
+	return s.user.refreshGeneration(), true
 }
 
 // ResolveDataPath finds name in dir, falling back to name+".gz".

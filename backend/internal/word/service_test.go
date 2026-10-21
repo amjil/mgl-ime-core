@@ -78,10 +78,10 @@ func TestServiceMissReturnsEmptySlice(t *testing.T) {
 	}
 	got, err = svc.GetCandidates("missing")
 	if err != nil || len(got) != 0 {
-		t.Fatalf("cached miss: %#v err=%v", got, err)
+		t.Fatalf("repeat miss: %#v err=%v", got, err)
 	}
-	if st.calls["c:missing"] != 1 {
-		t.Fatalf("expected miss to be cached, calls=%d", st.calls["c:missing"])
+	if st.calls["c:missing"] != 2 {
+		t.Fatalf("expected empty misses not to be cached, calls=%d", st.calls["c:missing"])
 	}
 }
 
