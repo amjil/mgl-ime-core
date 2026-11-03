@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"m-v-k/backend/internal/word/mongol"
 )
 
 func loadUserWordMap(path string) (map[string][]string, error) {
@@ -183,23 +185,65 @@ func (u *userOverlay) reloadIfStale() error {
 }
 
 func (u *userOverlay) getCandidates(key string) ([]string, bool) {
-	if err := u.reloadIfStale(); err != nil {
-		return nil, false
-	}
-	u.mu.RLock()
-	defer u.mu.RUnlock()
-	values, ok := u.full[key]
-	return cloneStrings(values), ok
+	return u.getOverlayList(key, u.full)
 }
 
 func (u *userOverlay) getNextWords(key string) ([]string, bool) {
+	return u.getOverlayList(key, u.next)
+}
+
+// getOverlayList merges user overlay entries for lookupKey. Besides exact key
+// hits, entries stored only under a full word key still match abbrev lookups
+// (AbbrevKey(storedKey) == lookupKey).
+func (u *userOverlay) getOverlayList(lookupKey string, data map[string][]string) ([]string, bool) {
 	if err := u.reloadIfStale(); err != nil {
 		return nil, false
 	}
 	u.mu.RLock()
 	defer u.mu.RUnlock()
-	values, ok := u.next[key]
-	return cloneStrings(values), ok
+
+	var merged []string
+	found := false
+	seenKeys := make(map[string]struct{}, 4)
+
+	tryKey := func(k string) {
+		if k == "" {
+			return
+		}
+		if _, done := seenKeys[k]; done {
+			return
+		}
+		seenKeys[k] = struct{}{}
+		values, ok := data[k]
+		if !ok || len(values) == 0 {
+			return
+		}
+		merged = mergeWordLists(values, merged)
+		found = true
+	}
+
+	for _, k := range mongol.LookupKeyVariants(lookupKey) {
+		tryKey(k)
+	}
+	tryKey(mongol.AbbrevKey(lookupKey))
+
+	for storedKey, values := range data {
+		if len(values) == 0 {
+			continue
+		}
+		if _, done := seenKeys[storedKey]; done {
+			continue
+		}
+		if mongol.AbbrevKey(storedKey) == lookupKey {
+			merged = mergeWordLists(values, merged)
+			found = true
+		}
+	}
+
+	if !found {
+		return nil, false
+	}
+	return merged, true
 }
 
 func (u *userOverlay) addUserWord(keys []string, word string, nextWords []string) error {
@@ -214,7 +258,16 @@ func (u *userOverlay) addUserWord(keys []string, word string, nextWords []string
 		u.full[key] = prependWord(u.full[key], word)
 	}
 	if len(nextWords) > 0 {
-		u.next[word] = prependWords(u.next[word], nextWords)
+		nextKeys := keys
+		if len(nextKeys) == 0 {
+			nextKeys = mongol.CandidateKeys(word)
+		}
+		if len(nextKeys) == 0 {
+			nextKeys = []string{word}
+		}
+		for _, key := range nextKeys {
+			u.next[key] = prependWords(u.next[key], nextWords)
+		}
 	}
 
 	if err := saveWordMap(u.fullPath, u.full); err != nil {

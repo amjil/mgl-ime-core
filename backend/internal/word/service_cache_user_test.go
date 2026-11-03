@@ -36,8 +36,8 @@ func TestAddUserWordInvalidatesCandidateQueryCache(t *testing.T) {
 	const added = "ᠣᠬᠢᠯᠠᠬᠤ"
 
 	st := &overlayStore{
-		candidates: map[string][]string{key: {"base-only"}},
-		nextWords:  map[string][]string{},
+		candidates: map[string][]ScoredWord{key: {scoreWord("base-only", 1)}},
+		nextWords:  map[string][]ScoredWord{},
 	}
 	svc := NewService(st, 8)
 

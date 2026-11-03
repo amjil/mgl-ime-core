@@ -57,7 +57,7 @@ func TestServiceSeesUserOverlayAfterExternalFileUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) == 0 || after[0] != added {
+	if len(after) == 0 || after[0].Word != added {
 		t.Fatalf("after file update: %#v, want first %q (service cache must refresh)", after, added)
 	}
 }

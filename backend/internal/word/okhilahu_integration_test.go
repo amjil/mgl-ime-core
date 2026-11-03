@@ -36,7 +36,7 @@ func TestOkhilahuUserOverlayCandidates(t *testing.T) {
 	const want = "ᠣᠬᠢᠯᠠᠬᠤ"
 
 	got, ok := st.GetCandidates(key)
-	if !ok || len(got) == 0 || got[0] != want {
+	if !ok || len(got) == 0 || got[0].Word != want {
 		t.Fatalf("JSONStore GetCandidates(%q) = %#v ok=%v, want first %q", key, got, ok, want)
 	}
 
