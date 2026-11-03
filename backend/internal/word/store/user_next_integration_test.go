@@ -39,7 +39,10 @@ func TestRealUserNextBaraganMerge(t *testing.T) {
 	if !ok {
 		t.Fatal("expected hit for baragan")
 	}
-	if len(words) < 2 || words[0] != "ᠡᠭᠦᠯᠡ" || words[1] != "ᠰᠡᠭᠦᠳᠡᠷ" {
+	if len(words) < 2 || words[0].Word != "ᠡᠭᠦᠯᠡ" || words[1].Word != "ᠰᠡᠭᠦᠳᠡᠷ" {
 		t.Fatalf("user_next not merged first: %#v", words)
+	}
+	if words[0].Order < UserFeedbackBaseOrder || words[0].Order <= words[1].Order {
+		t.Fatalf("user feedback order not ahead of the rest: %#v", words[:2])
 	}
 }

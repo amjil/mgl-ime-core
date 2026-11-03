@@ -37,13 +37,16 @@ func TestJSONStoreUserOverlayMergeAndPersist(t *testing.T) {
 	}
 
 	got, ok := st.GetCandidates(abbrev)
-	if !ok || got[0] != word || got[1] != "base" {
+	if !ok || got[0].Word != word || got[0].Order < UserFeedbackBaseOrder || got[1].Word != "base" {
 		t.Fatalf("merged candidates: %#v ok=%v", got, ok)
 	}
 
 	nextWords, ok := st.GetNextWords(word)
-	if !ok || nextWords[0] != "ᠬᠡ" || nextWords[1] != "ᠨᠡᠭᠡ" || nextWords[2] != "old" {
+	if !ok || nextWords[0].Word != "ᠬᠡ" || nextWords[1].Word != "ᠨᠡᠭᠡ" || nextWords[2].Word != "old" {
 		t.Fatalf("merged next words: %#v ok=%v", nextWords, ok)
+	}
+	if nextWords[0].Order < UserFeedbackBaseOrder || nextWords[0].Order <= nextWords[1].Order {
+		t.Fatalf("feedback next words not ranked first: %#v", nextWords)
 	}
 
 	raw, err := os.ReadFile(userFull)

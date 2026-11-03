@@ -6,11 +6,12 @@ import (
 	"sync"
 
 	"m-v-k/backend/internal/word/mongol"
+	"m-v-k/backend/internal/word/store"
 )
 
 type Store interface {
-	GetCandidates(word string) ([]string, bool)
-	GetNextWords(word string) ([]string, bool)
+	GetCandidates(word string) ([]store.ScoredWord, bool)
+	GetNextWords(word string) ([]store.ScoredWord, bool)
 }
 
 type UserWordStore interface {
@@ -23,10 +24,13 @@ type UserOverlayGenerationStore interface {
 }
 
 type Service struct {
-	store           Store
-	cache           *resultCache
-	userOverlayGen  uint64
-	userOverlaySeen bool
+	store Store
+	cache *resultCache
+
+	mu               sync.Mutex
+	cacheEpoch       uint64
+	observedStoreGen uint64
+	storeGenReady    bool
 }
 
 func NewService(store Store, cacheCapacity int) *Service {
@@ -39,12 +43,12 @@ func NewService(store Store, cacheCapacity int) *Service {
 	}
 }
 
-func (s *Service) GetCandidates(word string) ([]string, error) {
+func (s *Service) GetCandidates(word string) ([]store.ScoredWord, error) {
 	s.syncUserOverlayCache()
 	return s.lookup("c:"+word, word, s.store.GetCandidates), nil
 }
 
-func (s *Service) GetNextWords(word string) ([]string, error) {
+func (s *Service) GetNextWords(word string) ([]store.ScoredWord, error) {
 	s.syncUserOverlayCache()
 	return s.lookup("n:"+word, word, s.store.GetNextWords), nil
 }
@@ -58,15 +62,47 @@ func (s *Service) syncUserOverlayCache() {
 	if !ok {
 		return
 	}
-	if !s.userOverlaySeen {
-		s.userOverlaySeen = true
-		s.userOverlayGen = gen
+
+	s.mu.Lock()
+	if !s.storeGenReady {
+		s.storeGenReady = true
+		s.observedStoreGen = gen
+		s.mu.Unlock()
 		return
 	}
-	if gen != s.userOverlayGen {
-		s.cache.clear()
-		s.userOverlayGen = gen
+	changed := gen != s.observedStoreGen
+	if changed {
+		s.observedStoreGen = gen
+		s.cacheEpoch++
 	}
+	s.mu.Unlock()
+	if changed {
+		s.cache.clear()
+	}
+}
+
+func (s *Service) invalidateCache() {
+	if genStore, ok := s.store.(UserOverlayGenerationStore); ok {
+		if gen, ok := genStore.UserOverlayGeneration(); ok {
+			s.mu.Lock()
+			s.storeGenReady = true
+			s.observedStoreGen = gen
+			s.cacheEpoch++
+			s.mu.Unlock()
+			s.cache.clear()
+			return
+		}
+	}
+	s.mu.Lock()
+	s.cacheEpoch++
+	s.mu.Unlock()
+	s.cache.clear()
+}
+
+func (s *Service) epoch() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cacheEpoch
 }
 
 func (s *Service) AddUserWord(word string, nextWords []string) error {
@@ -84,46 +120,42 @@ func (s *Service) AddUserWord(word string, nextWords []string) error {
 		return err
 	}
 
-	for _, key := range keys {
-		s.cache.remove("c:" + key)
-		for _, variant := range mongol.LookupKeyVariants(key) {
-			s.cache.remove("c:" + variant)
-		}
-	}
-	for _, key := range mongol.LookupKeyVariants(word) {
-		s.cache.remove("n:" + key)
-	}
-	s.syncUserOverlayCache()
+	// Drop every cached query, including spellings that do not match the
+	// stored lookup keys. The next request reads the updated overlay.
+	s.invalidateCache()
 	return nil
 }
 
-func (s *Service) lookup(cacheKey, word string, load func(string) ([]string, bool)) []string {
+func (s *Service) lookup(cacheKey, word string, load func(string) ([]store.ScoredWord, bool)) []store.ScoredWord {
+	epoch := s.epoch()
 	if cached, ok := s.cache.get(cacheKey); ok {
 		return cached
 	}
 
 	words, ok := load(word)
 	if !ok {
-		words = []string{}
+		words = []store.ScoredWord{}
 	}
-	if ok && len(words) > 0 {
+	// Skip the put when feedback landed while this load was in flight.
+	// Otherwise a slow read of the old list would be cached again.
+	if ok && len(words) > 0 && s.epoch() == epoch {
 		s.cache.put(cacheKey, words)
 	}
-	return cloneSlice(words)
+	return cloneScored(words)
 }
 
-func cloneSlice(values []string) []string {
+func cloneScored(values []store.ScoredWord) []store.ScoredWord {
 	if len(values) == 0 {
-		return []string{}
+		return []store.ScoredWord{}
 	}
-	out := make([]string, len(values))
+	out := make([]store.ScoredWord, len(values))
 	copy(out, values)
 	return out
 }
 
 type cacheEntry struct {
 	key   string
-	value []string
+	value []store.ScoredWord
 }
 
 type resultCache struct {
@@ -144,7 +176,7 @@ func newResultCache(capacity int) *resultCache {
 	}
 }
 
-func (c *resultCache) get(key string) ([]string, bool) {
+func (c *resultCache) get(key string) ([]store.ScoredWord, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -153,19 +185,7 @@ func (c *resultCache) get(key string) ([]string, bool) {
 		return nil, false
 	}
 	c.ll.MoveToFront(el)
-	return cloneSlice(el.Value.(*cacheEntry).value), true
-}
-
-func (c *resultCache) remove(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	el, ok := c.items[key]
-	if !ok {
-		return
-	}
-	c.ll.Remove(el)
-	delete(c.items, key)
+	return cloneScored(el.Value.(*cacheEntry).value), true
 }
 
 func (c *resultCache) clear() {
@@ -176,11 +196,11 @@ func (c *resultCache) clear() {
 	c.items = make(map[string]*list.Element, c.capacity)
 }
 
-func (c *resultCache) put(key string, value []string) {
+func (c *resultCache) put(key string, value []store.ScoredWord) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	cloned := cloneSlice(value)
+	cloned := cloneScored(value)
 	if el, ok := c.items[key]; ok {
 		el.Value.(*cacheEntry).value = cloned
 		c.ll.MoveToFront(el)

@@ -13,8 +13,8 @@ import (
 )
 
 type JSONStore struct {
-	candidateMap map[string][]string
-	nextMap      map[string][]string
+	candidateMap map[string][]ScoredWord
+	nextMap      map[string][]ScoredWord
 	user         *userOverlay
 }
 
@@ -48,31 +48,49 @@ func NewJSONStoreWithUser(fullJSONPath, nextJSONPath, userFullPath, userNextPath
 	}, nil
 }
 
-func (s *JSONStore) GetCandidates(word string) ([]string, bool) {
-	return s.lookupMerged(word, s.candidateMap, func(key string) ([]string, bool) {
+func (s *JSONStore) GetCandidates(word string) ([]ScoredWord, bool) {
+	return s.lookupMerged(word, s.candidateMap, func(key string) ([]ScoredWord, bool) {
 		if s.user == nil {
 			return nil, false
 		}
-		return s.user.getCandidates(key)
+		words, ok := s.user.getCandidates(key)
+		if !ok {
+			return nil, false
+		}
+		return scoredFromUserWords(words), true
 	})
 }
 
-func (s *JSONStore) GetNextWords(word string) ([]string, bool) {
-	return s.lookupMerged(word, s.nextMap, func(key string) ([]string, bool) {
+func (s *JSONStore) GetNextWords(word string) ([]ScoredWord, bool) {
+	return s.lookupMerged(word, s.nextMap, func(key string) ([]ScoredWord, bool) {
 		if s.user == nil {
 			return nil, false
 		}
-		return s.user.getNextWords(key)
+		words, ok := s.user.getNextWords(key)
+		if !ok {
+			return nil, false
+		}
+		return scoredFromUserWords(words), true
 	})
 }
 
-func (s *JSONStore) lookupMerged(word string, baseMap map[string][]string, overlayFn func(string) ([]string, bool)) ([]string, bool) {
-	var merged []string
+func (s *JSONStore) lookupMerged(word string, baseMap map[string][]ScoredWord, overlayFn func(string) ([]ScoredWord, bool)) ([]ScoredWord, bool) {
+	var baseAll []ScoredWord
+	var overlayAll []ScoredWord
 	found := false
+	seenKeys := make(map[string]struct{}, 2)
 
 	for _, key := range mongol.LookupKeyVariants(word) {
+		if key == "" {
+			continue
+		}
+		if _, done := seenKeys[key]; done {
+			continue
+		}
+		seenKeys[key] = struct{}{}
+
 		base, baseOK := baseMap[key]
-		var overlay []string
+		var overlay []ScoredWord
 		overlayOK := false
 		if overlayFn != nil {
 			overlay, overlayOK = overlayFn(key)
@@ -81,13 +99,18 @@ func (s *JSONStore) lookupMerged(word string, baseMap map[string][]string, overl
 			continue
 		}
 		found = true
-		merged = mergeWordLists(merged, mergeWordLists(base, overlay))
+		if baseOK {
+			baseAll = append(baseAll, base...)
+		}
+		if overlayOK {
+			overlayAll = append(overlayAll, overlay...)
+		}
 	}
 
 	if !found {
 		return nil, false
 	}
-	return merged, true
+	return mergeScoredWordLists(baseAll, overlayAll), true
 }
 
 func (s *JSONStore) AddUserWord(keys []string, word string, nextWords []string) error {
@@ -123,7 +146,7 @@ func ResolveDataPath(dir, name string) (string, error) {
 	return "", fmt.Errorf("data file %q not found in %s (tried %s)", name, dir, strings.Join(candidates, ", "))
 }
 
-func loadWordMap(path string) (map[string][]string, error) {
+func loadWordMap(path string) (map[string][]ScoredWord, error) {
 	reader, err := openMaybeGzip(path)
 	if err != nil {
 		return nil, err
@@ -140,7 +163,7 @@ func loadWordMap(path string) (map[string][]string, error) {
 		return nil, fmt.Errorf("expected JSON object, got %v", tok)
 	}
 
-	out := make(map[string][]string)
+	out := make(map[string][]ScoredWord)
 	for decoder.More() {
 		keyTok, err := decoder.Token()
 		if err != nil {
@@ -168,39 +191,6 @@ func loadWordMap(path string) (map[string][]string, error) {
 	}
 
 	return out, nil
-}
-
-func parseWordList(raw json.RawMessage) ([]string, error) {
-	var items []json.RawMessage
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return nil, fmt.Errorf("expected list: %w", err)
-	}
-
-	words := make([]string, 0, len(items))
-	for _, item := range items {
-		if word, ok := unmarshalJSONString(item); ok {
-			word = strings.TrimSpace(word)
-			if word != "" {
-				words = append(words, word)
-			}
-			continue
-		}
-
-		var tuple []json.RawMessage
-		if err := json.Unmarshal(item, &tuple); err != nil || len(tuple) == 0 {
-			continue
-		}
-		word, ok := unmarshalJSONString(tuple[0])
-		if !ok {
-			continue
-		}
-		word = strings.TrimSpace(word)
-		if word != "" {
-			words = append(words, word)
-		}
-	}
-
-	return words, nil
 }
 
 func unmarshalJSONString(raw json.RawMessage) (string, bool) {

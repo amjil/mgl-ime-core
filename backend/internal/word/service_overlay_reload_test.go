@@ -43,7 +43,7 @@ func TestServiceSeesUserOverlayAfterExternalFileUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(before) != 1 || before[0] != "base-only" {
+	if len(before) != 1 || before[0].Word != "base-only" {
 		t.Fatalf("before file update: %#v", before)
 	}
 

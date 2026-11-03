@@ -45,14 +45,14 @@ func TestOkhilahuUserOverlayCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first) == 0 || first[0] != want {
-		t.Fatalf("service first query = %#v, want first %q", first, want)
+	if len(first) == 0 || first[0].Word != want || first[0].Order < store.UserFeedbackBaseOrder {
+		t.Fatalf("service first query = %#v, want first %q with feedback order", first, want)
 	}
 	second, err := svc.GetCandidates(key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second) == 0 || second[0] != want {
-		t.Fatalf("service cached query = %#v, want first %q", second, want)
+	if len(second) == 0 || second[0].Word != want || second[0].Order < store.UserFeedbackBaseOrder {
+		t.Fatalf("service cached query = %#v, want first %q with feedback order", second, want)
 	}
 }

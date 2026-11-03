@@ -8,11 +8,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"m-v-k/backend/internal/word/store"
 )
 
 type mockWordService struct {
-	candidates     []string
-	nextWords      []string
+	candidates     []store.ScoredWord
+	nextWords      []store.ScoredWord
 	candidateErr   error
 	nextWordsErr   error
 	addUserWordErr error
@@ -21,13 +23,13 @@ type mockWordService struct {
 	receivedForAPI string
 }
 
-func (m *mockWordService) GetCandidates(word string) ([]string, error) {
+func (m *mockWordService) GetCandidates(word string) ([]store.ScoredWord, error) {
 	m.receivedWord = word
 	m.receivedForAPI = "candidates"
 	return m.candidates, m.candidateErr
 }
 
-func (m *mockWordService) GetNextWords(word string) ([]string, error) {
+func (m *mockWordService) GetNextWords(word string) ([]store.ScoredWord, error) {
 	m.receivedWord = word
 	m.receivedForAPI = "next"
 	return m.nextWords, m.nextWordsErr
@@ -41,7 +43,10 @@ func (m *mockWordService) AddUserWord(word string, nextWords []string) error {
 }
 
 func TestHandleCandidatesSuccess(t *testing.T) {
-	svc := &mockWordService{candidates: []string{"a", "b"}}
+	svc := &mockWordService{candidates: []store.ScoredWord{
+		{Word: "a", Order: store.UserFeedbackBaseOrder},
+		{Word: "b", Order: 2},
+	}}
 	handler := NewWordHandler(svc)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/next_word/candidates", bytes.NewBufferString(`{"word":"ab"}`))
@@ -56,12 +61,17 @@ func TestHandleCandidatesSuccess(t *testing.T) {
 		t.Fatalf("service not called as expected")
 	}
 
-	var resp map[string][]string
+	var resp map[string][][]any
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response failed: %v", err)
 	}
-	if len(resp["candidates"]) != 2 {
-		t.Fatalf("unexpected candidates length: %d", len(resp["candidates"]))
+	got := resp["candidates"]
+	if len(got) != 2 || got[0][0] != "a" || got[1][0] != "b" {
+		t.Fatalf("unexpected candidates: %#v", got)
+	}
+	order, ok := got[0][1].(float64)
+	if !ok || order < store.UserFeedbackBaseOrder {
+		t.Fatalf("feedback order = %#v", got[0][1])
 	}
 }
 
@@ -90,7 +100,10 @@ func TestHandleCandidatesInternalError(t *testing.T) {
 }
 
 func TestHandleNextWordsSuccess(t *testing.T) {
-	svc := &mockWordService{nextWords: []string{"x", "y"}}
+	svc := &mockWordService{nextWords: []store.ScoredWord{
+		{Word: "x", Order: store.UserFeedbackBaseOrder},
+		{Word: "y", Order: 1},
+	}}
 	handler := NewWordHandler(svc)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/next_word/list", bytes.NewBufferString(`{"word":"ab"}`))
@@ -105,12 +118,17 @@ func TestHandleNextWordsSuccess(t *testing.T) {
 		t.Fatalf("service not called as expected")
 	}
 
-	var resp map[string][]string
+	var resp map[string][][]any
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response failed: %v", err)
 	}
-	if len(resp["nextWords"]) != 2 {
-		t.Fatalf("unexpected nextWords length: %d", len(resp["nextWords"]))
+	got := resp["nextWords"]
+	if len(got) != 2 || got[0][0] != "x" || got[1][0] != "y" {
+		t.Fatalf("unexpected nextWords: %#v", got)
+	}
+	order, ok := got[0][1].(float64)
+	if !ok || order < store.UserFeedbackBaseOrder || order <= got[1][1].(float64) {
+		t.Fatalf("feedback next word not ranked first: %#v", got)
 	}
 }
 

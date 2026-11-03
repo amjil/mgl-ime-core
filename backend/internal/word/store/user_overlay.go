@@ -17,7 +17,25 @@ func loadUserWordMap(path string) (map[string][]string, error) {
 		}
 		return nil, err
 	}
-	return loadWordMap(path)
+	ranked, err := loadWordMap(path)
+	if err != nil {
+		return nil, err
+	}
+	return scoredMapToWords(ranked), nil
+}
+
+func scoredMapToWords(ranked map[string][]ScoredWord) map[string][]string {
+	out := make(map[string][]string, len(ranked))
+	for key, list := range ranked {
+		words := make([]string, 0, len(list))
+		for _, sw := range list {
+			if sw.Word != "" {
+				words = append(words, sw.Word)
+			}
+		}
+		out[key] = words
+	}
+	return out
 }
 
 func saveWordMap(path string, data map[string][]string) error {

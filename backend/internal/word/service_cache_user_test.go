@@ -4,29 +4,38 @@ import (
 	"testing"
 
 	"m-v-k/backend/internal/word/mongol"
+	"m-v-k/backend/internal/word/store"
 )
 
 type overlayStore struct {
-	candidates map[string][]string
-	nextWords  map[string][]string
+	candidates map[string][]store.ScoredWord
+	nextWords  map[string][]store.ScoredWord
 }
 
-func (s *overlayStore) GetCandidates(word string) ([]string, bool) {
+func (s *overlayStore) GetCandidates(word string) ([]store.ScoredWord, bool) {
 	v, ok := s.candidates[word]
 	return v, ok
 }
 
-func (s *overlayStore) GetNextWords(word string) ([]string, bool) {
+func (s *overlayStore) GetNextWords(word string) ([]store.ScoredWord, bool) {
 	v, ok := s.nextWords[word]
 	return v, ok
 }
 
 func (s *overlayStore) AddUserWord(keys []string, word string, nextWords []string) error {
+	added := store.ScoredWord{Word: word, Order: store.UserFeedbackBaseOrder}
 	for _, key := range keys {
-		s.candidates[key] = append([]string{word}, s.candidates[key]...)
+		s.candidates[key] = append([]store.ScoredWord{added}, s.candidates[key]...)
 	}
 	if len(nextWords) > 0 {
-		s.nextWords[word] = append(nextWords, s.nextWords[word]...)
+		ranked := make([]store.ScoredWord, 0, len(nextWords))
+		for i, w := range nextWords {
+			ranked = append(ranked, store.ScoredWord{
+				Word:  w,
+				Order: store.UserFeedbackBaseOrder - float64(i),
+			})
+		}
+		s.nextWords[word] = append(ranked, s.nextWords[word]...)
 	}
 	return nil
 }
@@ -36,13 +45,15 @@ func TestAddUserWordInvalidatesCandidateQueryCache(t *testing.T) {
 	const added = "ᠣᠬᠢᠯᠠᠬᠤ"
 
 	st := &overlayStore{
-		candidates: map[string][]ScoredWord{key: {scoreWord("base-only", 1)}},
-		nextWords:  map[string][]ScoredWord{},
+		candidates: map[string][]store.ScoredWord{
+			key: {{Word: "base-only", Order: 1}},
+		},
+		nextWords: map[string][]store.ScoredWord{},
 	}
 	svc := NewService(st, 8)
 
 	before, _ := svc.GetCandidates(key)
-	if len(before) != 1 || before[0] != "base-only" {
+	if len(before) != 1 || before[0].Word != "base-only" {
 		t.Fatalf("before add: %#v", before)
 	}
 
@@ -51,7 +62,7 @@ func TestAddUserWordInvalidatesCandidateQueryCache(t *testing.T) {
 	}
 
 	after, _ := svc.GetCandidates(key)
-	if len(after) == 0 || after[0] != added {
+	if len(after) == 0 || after[0].Word != added {
 		t.Fatalf("after add: %#v, want first %q (cache may be stale)", after, added)
 	}
 }
@@ -61,13 +72,15 @@ func TestAddUserWordInvalidatesNextWordQueryCache(t *testing.T) {
 	const next = "ᠳᠠᠭᠤᠯᠠᠬᠤ"
 
 	st := &overlayStore{
-		candidates: map[string][]string{},
-		nextWords:  map[string][]string{word: {"old-next"}},
+		candidates: map[string][]store.ScoredWord{},
+		nextWords: map[string][]store.ScoredWord{
+			word: {{Word: "old-next", Order: 1}},
+		},
 	}
 	svc := NewService(st, 8)
 
 	before, _ := svc.GetNextWords(word)
-	if len(before) != 1 || before[0] != "old-next" {
+	if len(before) != 1 || before[0].Word != "old-next" {
 		t.Fatalf("before add: %#v", before)
 	}
 
@@ -76,7 +89,7 @@ func TestAddUserWordInvalidatesNextWordQueryCache(t *testing.T) {
 	}
 
 	after, _ := svc.GetNextWords(word)
-	if len(after) == 0 || after[0] != next {
+	if len(after) == 0 || after[0].Word != next {
 		t.Fatalf("after add: %#v, want first %q", after, next)
 	}
 }

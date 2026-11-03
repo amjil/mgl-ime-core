@@ -21,6 +21,15 @@ func TestParseWordListSupportsTupleAndString(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("expected 3 words, got %d", len(got))
 	}
+	if got[0].Word != "ᠨᠡᠯᠬᠡᠭᠡᠷ" || got[0].Order != 2 {
+		t.Fatalf("first entry: %#v", got[0])
+	}
+	if got[1].Word != "ᠨᠡᠯᠪᠡᠭᠡᠷ" || got[1].Order != 0 {
+		t.Fatalf("string entry: %#v", got[1])
+	}
+	if got[2].Word != "ᠨᠡᠯᠳᠡᠭᠡᠷ" || got[2].Order <= 0 || got[2].Order >= 1 {
+		t.Fatalf("third entry: %#v", got[2])
+	}
 }
 
 func TestParseWordListSkipsInvalidTuple(t *testing.T) {
@@ -32,7 +41,7 @@ func TestParseWordListSkipsInvalidTuple(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(got) != 1 || got[0] != "ok" {
+	if len(got) != 1 || got[0].Word != "ok" || got[0].Order != 0.1 {
 		t.Fatalf("unexpected output: %#v", got)
 	}
 }
@@ -107,7 +116,7 @@ func TestLoadWordMapPlainAndGzip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("load %s: %v", path, err)
 		}
-		if len(got["a"]) != 2 || got["a"][0] != "an" || got["a"][1] != "ab" {
+		if len(got["a"]) != 2 || got["a"][0].Word != "an" || got["a"][0].Order != 1 || got["a"][1].Word != "ab" {
 			t.Fatalf("unexpected map for %s: %#v", path, got)
 		}
 		if got["empty"] == nil || len(got["empty"]) != 0 {
@@ -132,11 +141,11 @@ func TestNewJSONStoreLoadsBothFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	words, ok := st.GetCandidates("a")
-	if !ok || len(words) != 1 || words[0] != "aa" {
+	if !ok || len(words) != 1 || words[0].Word != "aa" {
 		t.Fatalf("candidates: %#v ok=%v", words, ok)
 	}
 	nextWords, ok := st.GetNextWords("a")
-	if !ok || len(nextWords) != 1 || nextWords[0] != "ab" {
+	if !ok || len(nextWords) != 1 || nextWords[0].Word != "ab" || nextWords[0].Order != 12 {
 		t.Fatalf("next words: %#v ok=%v", nextWords, ok)
 	}
 	if _, ok := st.GetCandidates("missing"); ok {

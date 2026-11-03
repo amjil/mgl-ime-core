@@ -40,7 +40,7 @@ func TestCandidatesOverlayMatchesAbbrevWhenOnlyFullWordKeyStored(t *testing.T) {
 	if !ok {
 		t.Fatal("expected hit")
 	}
-	if len(got) == 0 || got[0] != word {
+	if len(got) == 0 || got[0].Word != word || got[0].Order < UserFeedbackBaseOrder {
 		t.Fatalf("GetCandidates(%q) = %#v, want %q first", abbrev, got, word)
 	}
 }
@@ -76,7 +76,7 @@ func TestRealKhaniUserOverlayAbbrev(t *testing.T) {
 	const word = "ᠬᠠᠨᠢ"
 
 	got, ok := st.GetCandidates(abbrev)
-	if !ok || len(got) == 0 || got[0].Word != word {
+	if !ok || len(got) == 0 || got[0].Word != word || got[0].Order < UserFeedbackBaseOrder {
 		t.Fatalf("GetCandidates(%q) = %#v ok=%v, want first %q", abbrev, got, ok, word)
 	}
 }

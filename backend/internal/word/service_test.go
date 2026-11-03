@@ -1,20 +1,32 @@
 package word
 
-import "testing"
+import (
+	"testing"
+
+	"m-v-k/backend/internal/word/store"
+)
+
+func scored(words ...string) []store.ScoredWord {
+	out := make([]store.ScoredWord, len(words))
+	for i, word := range words {
+		out[i] = store.ScoredWord{Word: word, Order: float64(len(words) - i)}
+	}
+	return out
+}
 
 type countingStore struct {
-	candidates map[string][]string
-	nextWords  map[string][]string
+	candidates map[string][]store.ScoredWord
+	nextWords  map[string][]store.ScoredWord
 	calls      map[string]int
 }
 
-func (s *countingStore) GetCandidates(word string) ([]string, bool) {
+func (s *countingStore) GetCandidates(word string) ([]store.ScoredWord, bool) {
 	s.calls["c:"+word]++
 	values, ok := s.candidates[word]
 	return values, ok
 }
 
-func (s *countingStore) GetNextWords(word string) ([]string, bool) {
+func (s *countingStore) GetNextWords(word string) ([]store.ScoredWord, bool) {
 	s.calls["n:"+word]++
 	values, ok := s.nextWords[word]
 	return values, ok
@@ -22,13 +34,13 @@ func (s *countingStore) GetNextWords(word string) ([]string, bool) {
 
 func newCountingStore() *countingStore {
 	return &countingStore{
-		candidates: map[string][]string{
-			"a": {"a1"},
-			"b": {"b1"},
-			"c": {"c1"},
+		candidates: map[string][]store.ScoredWord{
+			"a": scored("a1"),
+			"b": scored("b1"),
+			"c": scored("c1"),
 		},
-		nextWords: map[string][]string{
-			"a": {"an"},
+		nextWords: map[string][]store.ScoredWord{
+			"a": scored("an"),
 		},
 		calls: map[string]int{},
 	}
@@ -39,11 +51,11 @@ func TestServiceCachesHits(t *testing.T) {
 	svc := NewService(st, 8)
 
 	got, err := svc.GetCandidates("a")
-	if err != nil || len(got) != 1 || got[0] != "a1" {
+	if err != nil || len(got) != 1 || got[0].Word != "a1" {
 		t.Fatalf("first lookup: %#v err=%v", got, err)
 	}
 	got, err = svc.GetCandidates("a")
-	if err != nil || len(got) != 1 || got[0] != "a1" {
+	if err != nil || len(got) != 1 || got[0].Word != "a1" {
 		t.Fatalf("cached lookup: %#v err=%v", got, err)
 	}
 	if st.calls["c:a"] != 1 {
@@ -57,7 +69,7 @@ func TestServiceNamespacesCaches(t *testing.T) {
 
 	candidates, _ := svc.GetCandidates("a")
 	nextWords, _ := svc.GetNextWords("a")
-	if candidates[0] != "a1" || nextWords[0] != "an" {
+	if candidates[0].Word != "a1" || nextWords[0].Word != "an" {
 		t.Fatalf("candidates=%#v next=%#v", candidates, nextWords)
 	}
 	if st.calls["c:a"] != 1 || st.calls["n:a"] != 1 {
@@ -90,12 +102,12 @@ func TestServiceReturnedSliceIsIsolated(t *testing.T) {
 	svc := NewService(st, 8)
 
 	got, _ := svc.GetCandidates("a")
-	got[0] = "mutated"
+	got[0].Word = "mutated"
 	got, _ = svc.GetCandidates("a")
-	if got[0] != "a1" {
+	if got[0].Word != "a1" {
 		t.Fatalf("cache leaked mutation: %#v", got)
 	}
-	if st.candidates["a"][0] != "a1" {
+	if st.candidates["a"][0].Word != "a1" {
 		t.Fatalf("store leaked mutation: %#v", st.candidates["a"])
 	}
 }

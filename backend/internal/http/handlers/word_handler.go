@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"unicode/utf8"
+
+	"m-v-k/backend/internal/word/store"
 )
 
 const (
@@ -14,8 +16,8 @@ const (
 )
 
 type WordService interface {
-	GetCandidates(word string) ([]string, error)
-	GetNextWords(word string) ([]string, error)
+	GetCandidates(word string) ([]store.ScoredWord, error)
+	GetNextWords(word string) ([]store.ScoredWord, error)
 	AddUserWord(word string, nextWords []string) error
 }
 
@@ -49,7 +51,7 @@ func (h *WordHandler) HandleCandidates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string][]string{"candidates": candidates})
+	writeJSON(w, http.StatusOK, map[string]any{"candidates": encodeScoredList(candidates)})
 }
 
 func (h *WordHandler) HandleAddUserWord(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +86,18 @@ func (h *WordHandler) HandleNextWords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string][]string{"nextWords": nextWords})
+	writeJSON(w, http.StatusOK, map[string]any{"nextWords": encodeScoredList(nextWords)})
+}
+
+func encodeScoredList(words []store.ScoredWord) []any {
+	out := make([]any, 0, len(words))
+	for _, w := range words {
+		if w.Word == "" {
+			continue
+		}
+		out = append(out, []any{w.Word, w.Order})
+	}
+	return out
 }
 
 const maxNextWordsInRequest = 64
