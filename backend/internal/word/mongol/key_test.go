@@ -45,3 +45,22 @@ func TestCandidateKeysIncludesFullAndAbbrev(t *testing.T) {
 		t.Fatalf("unexpected keys: %#v", keys)
 	}
 }
+
+func TestCandidateKeysIncludesNormalizedWhenControlsPresent(t *testing.T) {
+	word := "ᠪᠠᠷᠠᠭᠠᠨ\u180e"
+	norm := "ᠪᠠᠷᠠᠭᠠᠨ"
+	keys := CandidateKeys(word)
+	if len(keys) < 2 || keys[0] != word || keys[1] != norm {
+		t.Fatalf("CandidateKeys = %#v, want exact then normalized", keys)
+	}
+	foundAbbrev := false
+	for _, k := range keys {
+		if k == AbbrevKey(word) {
+			foundAbbrev = true
+			break
+		}
+	}
+	if !foundAbbrev {
+		t.Fatalf("CandidateKeys missing abbrev: %#v", keys)
+	}
+}

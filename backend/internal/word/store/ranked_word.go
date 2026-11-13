@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -18,6 +19,39 @@ const UserFeedbackBaseOrder = 1e15
 type ScoredWord struct {
 	Word  string
 	Order float64
+}
+
+// MarshalJSON serializes ScoredWord as a 2-tuple ["word", order].
+func (sw ScoredWord) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	buf.Grow(len(sw.Word) + 16)
+	buf.WriteByte('[')
+	wordJSON, err := json.Marshal(sw.Word)
+	if err != nil {
+		return nil, err
+	}
+	buf.Write(wordJSON)
+	buf.WriteByte(',')
+	buf.WriteString(strconv.FormatFloat(sw.Order, 'f', -1, 64))
+	buf.WriteByte(']')
+	return buf.Bytes(), nil
+}
+
+// NormalizeUserFeedbackOrder guarantees that a user-supplied rank sits in the
+// authoritative feedback tier (>= UserFeedbackBaseOrder).
+func NormalizeUserFeedbackOrder(rawOrder float64, index int, total int) float64 {
+	if rawOrder >= UserFeedbackBaseOrder {
+		return rawOrder
+	}
+	if rawOrder > 0 {
+		return UserFeedbackBaseOrder + rawOrder
+	}
+	// When no explicit score is given, preserve list order above UserFeedbackBaseOrder.
+	offset := float64(total - index)
+	if offset < 0 {
+		offset = 0
+	}
+	return UserFeedbackBaseOrder + offset
 }
 
 func scoredFromUserWords(words []string) []ScoredWord {
@@ -39,8 +73,8 @@ type scoredAcc struct {
 	user bool
 }
 
-// mergeScoredWordLists keeps user-feedback order authoritative, then sorts by
-// descending order. Dictionary duplicates keep the higher score.
+// mergeScoredWordLists keeps user-feedback entries strictly ahead of base dictionary
+// entries, sorted by descending feedback order. Dictionary duplicates keep the higher score.
 func mergeScoredWordLists(base, overlay []ScoredWord) []ScoredWord {
 	index := make(map[string]int, len(base)+len(overlay))
 	out := make([]scoredAcc, 0, len(base)+len(overlay))
@@ -75,6 +109,9 @@ func mergeScoredWordLists(base, overlay []ScoredWord) []ScoredWord {
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].user != out[j].user {
+			return out[i].user
+		}
 		return out[i].sw.Order > out[j].sw.Order
 	})
 
@@ -85,6 +122,39 @@ func mergeScoredWordLists(base, overlay []ScoredWord) []ScoredWord {
 	return ranked
 }
 
+// mergeUserScoredLists merges two user-feedback lists by descending order.
+// Both sides are treated as feedback so the user-vs-dictionary tier does not apply.
+func mergeUserScoredLists(primary, secondary []ScoredWord) []ScoredWord {
+	index := make(map[string]int, len(primary)+len(secondary))
+	out := make([]ScoredWord, 0, len(primary)+len(secondary))
+
+	consider := func(sw ScoredWord) {
+		if sw.Word == "" {
+			return
+		}
+		if i, ok := index[sw.Word]; ok {
+			if sw.Order > out[i].Order {
+				out[i].Order = sw.Order
+			}
+			return
+		}
+		index[sw.Word] = len(out)
+		out = append(out, sw)
+	}
+
+	for _, sw := range primary {
+		consider(sw)
+	}
+	for _, sw := range secondary {
+		consider(sw)
+	}
+
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Order > out[j].Order
+	})
+	return out
+}
+
 func parseWordList(raw json.RawMessage) ([]ScoredWord, error) {
 	var items []json.RawMessage
 	if err := json.Unmarshal(raw, &items); err != nil {
@@ -93,25 +163,32 @@ func parseWordList(raw json.RawMessage) ([]ScoredWord, error) {
 
 	words := make([]ScoredWord, 0, len(items))
 	for _, item := range items {
-		if word, ok := unmarshalJSONString(item); ok {
-			word = strings.TrimSpace(word)
-			if word != "" {
-				words = append(words, ScoredWord{Word: word, Order: 0})
-			}
-			continue
+		if sw, ok := ParseScoredWordItem(item); ok {
+			words = append(words, sw)
 		}
+	}
+	return words, nil
+}
 
-		var tuple []json.RawMessage
-		if err := json.Unmarshal(item, &tuple); err != nil || len(tuple) == 0 {
-			continue
+// ParseScoredWordItem parses either "word", ["word", score], or {"word":"...", "order": score}.
+func ParseScoredWordItem(item json.RawMessage) (ScoredWord, bool) {
+	if word, ok := unmarshalJSONString(item); ok {
+		word = strings.TrimSpace(word)
+		if word == "" {
+			return ScoredWord{}, false
 		}
+		return ScoredWord{Word: word, Order: 0}, true
+	}
+
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(item, &tuple); err == nil && len(tuple) > 0 {
 		word, ok := unmarshalJSONString(tuple[0])
 		if !ok {
-			continue
+			return ScoredWord{}, false
 		}
 		word = strings.TrimSpace(word)
 		if word == "" {
-			continue
+			return ScoredWord{}, false
 		}
 		order := 0.0
 		if len(tuple) > 1 {
@@ -119,10 +196,33 @@ func parseWordList(raw json.RawMessage) ([]ScoredWord, error) {
 				order = n
 			}
 		}
-		words = append(words, ScoredWord{Word: word, Order: order})
+		return ScoredWord{Word: word, Order: order}, true
 	}
 
-	return words, nil
+	var obj struct {
+		Word  string          `json:"word"`
+		Order json.RawMessage `json:"order"`
+		Score json.RawMessage `json:"score"`
+	}
+	if err := json.Unmarshal(item, &obj); err == nil {
+		word := strings.TrimSpace(obj.Word)
+		if word == "" {
+			return ScoredWord{}, false
+		}
+		order := 0.0
+		if len(obj.Order) > 0 {
+			if n, ok := parseScore(obj.Order); ok {
+				order = n
+			}
+		} else if len(obj.Score) > 0 {
+			if n, ok := parseScore(obj.Score); ok {
+				order = n
+			}
+		}
+		return ScoredWord{Word: word, Order: order}, true
+	}
+
+	return ScoredWord{}, false
 }
 
 func parseScore(raw json.RawMessage) (float64, bool) {

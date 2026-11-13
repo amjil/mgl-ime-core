@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -18,10 +19,10 @@ var ErrUserDictNotConfigured = errors.New("user dictionary is not configured")
 
 const maxUserNextWords = 64
 
-func loadUserWordMap(path string) (map[string][]string, error) {
+func loadUserScoredMap(path string) (map[string][]ScoredWord, error) {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
-			return make(map[string][]string), nil
+			return make(map[string][]ScoredWord), nil
 		}
 		return nil, err
 	}
@@ -29,27 +30,52 @@ func loadUserWordMap(path string) (map[string][]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return scoredMapToWords(ranked), nil
+	out := make(map[string][]ScoredWord, len(ranked))
+	for key, list := range ranked {
+		words := make([]ScoredWord, 0, len(list))
+		for i, sw := range list {
+			if sw.Word == "" {
+				continue
+			}
+			order := sw.Order
+			if order <= 0 {
+				// Assign descending feedback order based on stored list position.
+				order = UserFeedbackBaseOrder - float64(i)
+			} else if order < UserFeedbackBaseOrder {
+				order = UserFeedbackBaseOrder + order
+			}
+			words = append(words, ScoredWord{
+				Word:  sw.Word,
+				Order: order,
+			})
+		}
+		// Ensure the loaded list is sorted by descending order.
+		sort.SliceStable(words, func(i, j int) bool {
+			return words[i].Order > words[j].Order
+		})
+		out[key] = words
+	}
+	return out, nil
 }
 
-func scoredMapToWords(ranked map[string][]ScoredWord) map[string][]string {
-	out := make(map[string][]string, len(ranked))
-	for key, list := range ranked {
+// saveUserScoredMap writes the sorted word list as strings so existing tools and tests
+// expecting map[string][]string in user_full.json / user_next.json remain compatible,
+// while preserving the exact feedback rank order in list positions.
+func saveUserScoredMap(path string, data map[string][]ScoredWord) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	plain := make(map[string][]string, len(data))
+	for k, list := range data {
 		words := make([]string, 0, len(list))
 		for _, sw := range list {
 			if sw.Word != "" {
 				words = append(words, sw.Word)
 			}
 		}
-		out[key] = words
+		plain[k] = words
 	}
-	return out
-}
 
-func saveWordMap(path string, data map[string][]string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	tmp := path + ".tmp"
 	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -57,7 +83,7 @@ func saveWordMap(path string, data map[string][]string) error {
 	}
 	enc := json.NewEncoder(file)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(data); err != nil {
+	if err := enc.Encode(plain); err != nil {
 		file.Close()
 		_ = os.Remove(tmp)
 		return err
@@ -69,78 +95,61 @@ func saveWordMap(path string, data map[string][]string) error {
 	return os.Rename(tmp, path)
 }
 
-func mergeWordLists(base, overlay []string) []string {
-	if len(overlay) == 0 {
-		return cloneStrings(base)
+// prependScoredWords merges incoming feedback entries with existing user entries.
+// New feedback with explicit Order is ranked by Order; feedback without explicit Order (Order <= 0)
+// is boosted above existing entries so the latest feedback always appears first.
+func prependScoredWords(existing []ScoredWord, incoming []ScoredWord, limit int) []ScoredWord {
+	if len(incoming) == 0 {
+		return cloneScoredWords(existing)
 	}
-	if len(base) == 0 {
-		return cloneStrings(overlay)
-	}
-	seen := make(map[string]struct{}, len(base)+len(overlay))
-	out := make([]string, 0, len(base)+len(overlay))
-	appendUnique := func(words []string) {
-		for _, w := range words {
-			if w == "" {
-				continue
-			}
-			if _, ok := seen[w]; ok {
-				continue
-			}
-			seen[w] = struct{}{}
-			out = append(out, w)
+
+	// Find current max order among existing entries to boost un-scored new feedback above it.
+	maxExisting := float64(UserFeedbackBaseOrder)
+	for _, sw := range existing {
+		if sw.Order > maxExisting {
+			maxExisting = sw.Order
 		}
 	}
-	appendUnique(overlay)
-	appendUnique(base)
-	return out
+
+	normalizedIncoming := make([]ScoredWord, 0, len(incoming))
+	n := len(incoming)
+	for i, sw := range incoming {
+		if sw.Word == "" {
+			continue
+		}
+		order := sw.Order
+		if order <= 0 {
+			// Latest feedback without explicit score gets placed strictly ahead of existing entries.
+			order = maxExisting + float64(n-i)
+		} else if order < UserFeedbackBaseOrder {
+			order = UserFeedbackBaseOrder + order
+		}
+		normalizedIncoming = append(normalizedIncoming, ScoredWord{
+			Word:  sw.Word,
+			Order: order,
+		})
+	}
+
+	merged := mergeUserScoredLists(normalizedIncoming, existing)
+	if limit > 0 && len(merged) > limit {
+		merged = merged[:limit]
+	}
+	return merged
 }
 
-func prependWord(list []string, word string) []string {
-	return prependWords(list, []string{word}, 0)
-}
-
-func prependWords(list []string, words []string, limit int) []string {
-	if len(words) == 0 {
-		return cloneStrings(list)
-	}
-	seen := make(map[string]struct{}, len(list)+len(words))
-	out := make([]string, 0, len(list)+len(words))
-	appendUnique := func(w string) {
-		if w == "" {
-			return
-		}
-		if limit > 0 && len(out) >= limit {
-			return
-		}
-		if _, ok := seen[w]; ok {
-			return
-		}
-		seen[w] = struct{}{}
-		out = append(out, w)
-	}
-	for _, w := range words {
-		appendUnique(w)
-	}
-	for _, w := range list {
-		appendUnique(w)
-	}
-	return out
-}
-
-func cloneStrings(values []string) []string {
+func cloneScoredWords(values []ScoredWord) []ScoredWord {
 	if len(values) == 0 {
 		return nil
 	}
-	out := make([]string, len(values))
+	out := make([]ScoredWord, len(values))
 	copy(out, values)
 	return out
 }
 
-// buildAbbrevIndex precomputes a secondary index mapping AbbrevKey(storedKey) -> merged words
-// in deterministic key order, avoiding O(N) map scans and random map iteration order on lookup.
-func buildAbbrevIndex(data map[string][]string) map[string][]string {
+// buildAbbrevScoredIndex precomputes AbbrevKey(storedKey) -> merged ScoredWords in deterministic order.
+func buildAbbrevScoredIndex(data map[string][]ScoredWord) map[string][]ScoredWord {
 	if len(data) == 0 {
-		return make(map[string][]string)
+		return make(map[string][]ScoredWord)
 	}
 	keys := make([]string, 0, len(data))
 	for k, v := range data {
@@ -150,64 +159,25 @@ func buildAbbrevIndex(data map[string][]string) map[string][]string {
 	}
 	slices.Sort(keys)
 
-	idx := make(map[string][]string)
+	idx := make(map[string][]ScoredWord)
 	for _, storedKey := range keys {
 		abbrev := mongol.AbbrevKey(storedKey)
 		if abbrev == "" || abbrev == storedKey {
 			continue
 		}
-		// Keep earlier keys authoritative while deterministically merging fallback lists.
-		idx[abbrev] = mergeWordLists(data[storedKey], idx[abbrev])
+		idx[abbrev] = mergeUserScoredLists(idx[abbrev], data[storedKey])
 	}
 	return idx
-}
-
-// updateAbbrevIndexForKeys refreshes only abbrev buckets touched by keys, preserving
-// deterministic merge order without rebuilding unrelated index entries.
-func updateAbbrevIndexForKeys(idx map[string][]string, data map[string][]string, keys []string) {
-	if idx == nil || len(keys) == 0 {
-		return
-	}
-	affected := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		abbrev := mongol.AbbrevKey(key)
-		if abbrev == "" || abbrev == key {
-			continue
-		}
-		affected[abbrev] = struct{}{}
-	}
-	if len(affected) == 0 {
-		return
-	}
-	for abbrev := range affected {
-		delete(idx, abbrev)
-	}
-	contrib := make([]string, 0, len(affected))
-	for storedKey, values := range data {
-		if len(values) == 0 {
-			continue
-		}
-		abbrev := mongol.AbbrevKey(storedKey)
-		if _, ok := affected[abbrev]; !ok || abbrev == storedKey {
-			continue
-		}
-		contrib = append(contrib, storedKey)
-	}
-	slices.Sort(contrib)
-	for _, storedKey := range contrib {
-		abbrev := mongol.AbbrevKey(storedKey)
-		idx[abbrev] = mergeWordLists(data[storedKey], idx[abbrev])
-	}
 }
 
 type userOverlay struct {
 	mu          sync.RWMutex
 	fullPath    string
 	nextPath    string
-	full        map[string][]string
-	next        map[string][]string
-	fullAbbrev  map[string][]string
-	nextAbbrev  map[string][]string
+	full        map[string][]ScoredWord
+	next        map[string][]ScoredWord
+	fullAbbrev  map[string][]ScoredWord
+	nextAbbrev  map[string][]ScoredWord
 	fullModTime atomic.Int64
 	nextModTime atomic.Int64
 	generation  atomic.Uint64
@@ -235,31 +205,29 @@ func newUserOverlay(fullPath, nextPath string) (*userOverlay, error) {
 }
 
 func (u *userOverlay) reloadLocked() error {
-	full, err := loadUserWordMap(u.fullPath)
+	full, err := loadUserScoredMap(u.fullPath)
 	if err != nil {
 		return fmt.Errorf("load user full json (%s): %w", u.fullPath, err)
 	}
-	next, err := loadUserWordMap(u.nextPath)
+	next, err := loadUserScoredMap(u.nextPath)
 	if err != nil {
 		return fmt.Errorf("load user next json (%s): %w", u.nextPath, err)
 	}
 	u.full = full
 	u.next = next
-	u.fullAbbrev = buildAbbrevIndex(full)
-	u.nextAbbrev = buildAbbrevIndex(next)
+	u.fullAbbrev = buildAbbrevScoredIndex(full)
+	u.nextAbbrev = buildAbbrevScoredIndex(next)
 	u.fullModTime.Store(fileModTime(u.fullPath))
 	u.nextModTime.Store(fileModTime(u.nextPath))
 	u.generation.Add(1)
 	return nil
 }
 
-// isStale checks file modification times without acquiring the write lock first.
 func (u *userOverlay) isStale() bool {
 	return fileModTime(u.fullPath) != u.fullModTime.Load() ||
 		fileModTime(u.nextPath) != u.nextModTime.Load()
 }
 
-// refreshGeneration reloads overlay files only when disk modification times change.
 func (u *userOverlay) refreshGeneration() uint64 {
 	if u.isStale() {
 		u.mu.Lock()
@@ -278,16 +246,17 @@ func (u *userOverlay) reloadIfStaleLocked() error {
 	return u.reloadLocked()
 }
 
-func (u *userOverlay) getCandidates(key string) ([]string, bool) {
+func (u *userOverlay) getCandidates(key string) ([]ScoredWord, bool) {
 	return u.getOverlayList(key, false)
 }
 
-func (u *userOverlay) getNextWords(key string) ([]string, bool) {
+func (u *userOverlay) getNextWords(key string) ([]ScoredWord, bool) {
 	return u.getOverlayList(key, true)
 }
 
-// getOverlayList merges user overlay entries for lookupKey in O(1) using precomputed abbrev indexes.
-func (u *userOverlay) getOverlayList(lookupKey string, isNext bool) ([]string, bool) {
+// getOverlayList merges user overlay entries for lookupKey in O(1), ensuring direct key
+// hits outrank abbreviated fallback hits.
+func (u *userOverlay) getOverlayList(lookupKey string, isNext bool) ([]ScoredWord, bool) {
 	if u.isStale() {
 		u.mu.Lock()
 		if u.isStale() {
@@ -309,10 +278,13 @@ func (u *userOverlay) getOverlayList(lookupKey string, isNext bool) ([]string, b
 		abbrevIdx = u.nextAbbrev
 	}
 
-	var merged []string
+	var merged []ScoredWord
 	found := false
 	seenKeys := make(map[string]struct{}, 4)
 
+	// tierPenalty ensures exact key matches strictly outrank normalized/abbrev fallback matches
+	// when both have default feedback scores.
+	tier := 0.0
 	tryKey := func(k string) {
 		if k == "" {
 			return
@@ -325,8 +297,15 @@ func (u *userOverlay) getOverlayList(lookupKey string, isNext bool) ([]string, b
 		if !ok || len(values) == 0 {
 			return
 		}
-		// Keep earlier matched keys authoritative ahead of fallback keys.
-		merged = mergeWordLists(values, merged)
+		adjusted := make([]ScoredWord, len(values))
+		for i, sw := range values {
+			adjusted[i] = ScoredWord{
+				Word:  sw.Word,
+				Order: sw.Order - tier,
+			}
+		}
+		tier += 1000.0
+		merged = mergeUserScoredLists(merged, adjusted)
 		found = true
 	}
 
@@ -336,7 +315,16 @@ func (u *userOverlay) getOverlayList(lookupKey string, isNext bool) ([]string, b
 	tryKey(mongol.AbbrevKey(lookupKey))
 
 	if fallback, ok := abbrevIdx[lookupKey]; ok && len(fallback) > 0 {
-		merged = mergeWordLists(fallback, merged)
+		// Reuse current tier so sole abbrev-index hits keep full feedback order,
+		// while hits after a direct key stay strictly below that key's entries.
+		adjusted := make([]ScoredWord, len(fallback))
+		for i, sw := range fallback {
+			adjusted[i] = ScoredWord{
+				Word:  sw.Word,
+				Order: sw.Order - tier,
+			}
+		}
+		merged = mergeUserScoredLists(merged, adjusted)
 		found = true
 	}
 
@@ -346,7 +334,7 @@ func (u *userOverlay) getOverlayList(lookupKey string, isNext bool) ([]string, b
 	return merged, true
 }
 
-func (u *userOverlay) addUserWord(keys []string, word string, nextWords []string) error {
+func (u *userOverlay) addUserWord(keys []string, word ScoredWord, nextWords []ScoredWord) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
@@ -354,31 +342,31 @@ func (u *userOverlay) addUserWord(keys []string, word string, nextWords []string
 		return err
 	}
 	for _, key := range keys {
-		u.full[key] = prependWord(u.full[key], word)
+		u.full[key] = prependScoredWords(u.full[key], []ScoredWord{word}, 0)
 	}
-	updateAbbrevIndexForKeys(u.fullAbbrev, u.full, keys)
+	u.fullAbbrev = buildAbbrevScoredIndex(u.full)
 
 	if len(nextWords) > 0 {
 		nextKeys := keys
 		if len(nextKeys) == 0 {
-			nextKeys = mongol.CandidateKeys(word)
+			nextKeys = mongol.CandidateKeys(word.Word)
 		}
 		if len(nextKeys) == 0 {
-			nextKeys = []string{word}
+			nextKeys = []string{word.Word}
 		}
 		for _, key := range nextKeys {
-			u.next[key] = prependWords(u.next[key], nextWords, maxUserNextWords)
+			u.next[key] = prependScoredWords(u.next[key], nextWords, maxUserNextWords)
 		}
-		updateAbbrevIndexForKeys(u.nextAbbrev, u.next, nextKeys)
+		u.nextAbbrev = buildAbbrevScoredIndex(u.next)
 	}
 
-	if err := saveWordMap(u.fullPath, u.full); err != nil {
+	if err := saveUserScoredMap(u.fullPath, u.full); err != nil {
 		return err
 	}
 	u.fullModTime.Store(fileModTime(u.fullPath))
 
 	if len(nextWords) > 0 {
-		if err := saveWordMap(u.nextPath, u.next); err != nil {
+		if err := saveUserScoredMap(u.nextPath, u.next); err != nil {
 			return err
 		}
 		u.nextModTime.Store(fileModTime(u.nextPath))

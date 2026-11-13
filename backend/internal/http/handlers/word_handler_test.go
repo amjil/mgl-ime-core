@@ -180,6 +180,52 @@ func TestHandleAddUserWordSuccess(t *testing.T) {
 	}
 }
 
+type mockScoredWordService struct {
+	mockWordService
+	receivedScoredWord store.ScoredWord
+	receivedScoredNext []store.ScoredWord
+}
+
+func (m *mockScoredWordService) AddUserScoredWord(word store.ScoredWord, nextWords []store.ScoredWord) error {
+	m.receivedScoredWord = word
+	m.receivedScoredNext = nextWords
+	m.receivedForAPI = "add-user-scored-word"
+	return nil
+}
+
+func TestHandleAddUserWordWithWeightedTuples(t *testing.T) {
+	svc := &mockScoredWordService{}
+	handler := NewWordHandler(svc)
+
+	body := `{"word":"ᠮᠤᠩᠭᠤᠯ","nextWords":[["ᠤᠯᠤᠰ",10],["ᠬᠡᠯᠡ",50],"plain"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/user_words", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+
+	handler.HandleAddUserWord(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if svc.receivedForAPI != "add-user-scored-word" {
+		t.Fatalf("expected scored path, got %q", svc.receivedForAPI)
+	}
+	if svc.receivedScoredWord.Word != "ᠮᠤᠩᠭᠤᠯ" {
+		t.Fatalf("word = %#v", svc.receivedScoredWord)
+	}
+	if len(svc.receivedScoredNext) != 3 {
+		t.Fatalf("next = %#v", svc.receivedScoredNext)
+	}
+	if svc.receivedScoredNext[0].Word != "ᠤᠯᠤᠰ" || svc.receivedScoredNext[0].Order != 10 {
+		t.Fatalf("first = %#v", svc.receivedScoredNext[0])
+	}
+	if svc.receivedScoredNext[1].Word != "ᠬᠡᠯᠡ" || svc.receivedScoredNext[1].Order != 50 {
+		t.Fatalf("second = %#v", svc.receivedScoredNext[1])
+	}
+	if svc.receivedScoredNext[2].Word != "plain" || svc.receivedScoredNext[2].Order != 0 {
+		t.Fatalf("third = %#v", svc.receivedScoredNext[2])
+	}
+}
+
 func TestHandleCandidatesBodyTooLarge(t *testing.T) {
 	handler := NewWordHandler(&mockWordService{})
 	body := `{"word":"` + strings.Repeat("a", maxRequestBodyBytes) + `"}`

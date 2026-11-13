@@ -39,3 +39,41 @@ func TestParseStringScore(t *testing.T) {
 		t.Fatalf("got %#v", got)
 	}
 }
+
+func TestParseScoredWordItemFormats(t *testing.T) {
+	plain, ok := ParseScoredWordItem(jsonRaw(`"ᠤᠯᠤᠰ"`))
+	if !ok || plain.Word != "ᠤᠯᠤᠰ" || plain.Order != 0 {
+		t.Fatalf("plain = %#v ok=%v", plain, ok)
+	}
+
+	tuple, ok := ParseScoredWordItem(jsonRaw(`["ᠬᠡᠯᠡ", 50]`))
+	if !ok || tuple.Word != "ᠬᠡᠯᠡ" || tuple.Order != 50 {
+		t.Fatalf("tuple = %#v ok=%v", tuple, ok)
+	}
+
+	obj, ok := ParseScoredWordItem(jsonRaw(`{"word":"ᠪᠢᠴᠢᠭ","order":100}`))
+	if !ok || obj.Word != "ᠪᠢᠴᠢᠭ" || obj.Order != 100 {
+		t.Fatalf("obj = %#v ok=%v", obj, ok)
+	}
+}
+
+func TestNormalizeUserFeedbackOrder(t *testing.T) {
+	if got := NormalizeUserFeedbackOrder(50, 0, 2); got != UserFeedbackBaseOrder+50 {
+		t.Fatalf("positive raw = %v", got)
+	}
+	if got := NormalizeUserFeedbackOrder(UserFeedbackBaseOrder+9, 0, 2); got != UserFeedbackBaseOrder+9 {
+		t.Fatalf("already elevated = %v", got)
+	}
+	if got := NormalizeUserFeedbackOrder(0, 0, 2); got != UserFeedbackBaseOrder+2 {
+		t.Fatalf("list position = %v", got)
+	}
+}
+
+func TestMergeScoredWordListsUserTierBeatsHigherDictionaryOrder(t *testing.T) {
+	base := []ScoredWord{{Word: "dict", Order: UserFeedbackBaseOrder + 999}}
+	user := []ScoredWord{{Word: "feedback", Order: 1}}
+	merged := mergeScoredWordLists(base, user)
+	if len(merged) != 2 || merged[0].Word != "feedback" || merged[1].Word != "dict" {
+		t.Fatalf("user tier should win regardless of raw order: %#v", merged)
+	}
+}

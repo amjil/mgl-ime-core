@@ -72,11 +72,7 @@ func (s *JSONStore) GetCandidates(word string) ([]ScoredWord, bool) {
 		if s.user == nil {
 			return nil, false
 		}
-		words, ok := s.user.getCandidates(key)
-		if !ok {
-			return nil, false
-		}
-		return scoredFromUserWords(words), true
+		return s.user.getCandidates(key)
 	})
 }
 
@@ -85,11 +81,7 @@ func (s *JSONStore) GetNextWords(word string) ([]ScoredWord, bool) {
 		if s.user == nil {
 			return nil, false
 		}
-		words, ok := s.user.getNextWords(key)
-		if !ok {
-			return nil, false
-		}
-		return scoredFromUserWords(words), true
+		return s.user.getNextWords(key)
 	})
 }
 
@@ -121,7 +113,16 @@ func (s *JSONStore) lookupMerged(word string, baseMap map[string][]ScoredWord, o
 			baseAll = append(baseAll, base...)
 		}
 		if overlayOK {
-			overlayAll = append(overlayAll, overlay...)
+			// Keep exact match variant strictly higher than normalized fallback variant.
+			if i > 0 {
+				adjusted := make([]ScoredWord, len(overlay))
+				penalty := float64(i) * 100.0
+				for j, sw := range overlay {
+					adjusted[j] = ScoredWord{Word: sw.Word, Order: sw.Order - penalty}
+				}
+				overlay = adjusted
+			}
+			overlayAll = mergeUserScoredLists(overlayAll, overlay)
 		}
 	}
 
@@ -132,6 +133,16 @@ func (s *JSONStore) lookupMerged(word string, baseMap map[string][]ScoredWord, o
 }
 
 func (s *JSONStore) AddUserWord(keys []string, word string, nextWords []string) error {
+	scoredNext := make([]ScoredWord, 0, len(nextWords))
+	for _, w := range nextWords {
+		if w != "" {
+			scoredNext = append(scoredNext, ScoredWord{Word: w, Order: 0})
+		}
+	}
+	return s.AddUserScoredWord(keys, ScoredWord{Word: word, Order: 0}, scoredNext)
+}
+
+func (s *JSONStore) AddUserScoredWord(keys []string, word ScoredWord, nextWords []ScoredWord) error {
 	if s.user == nil {
 		return ErrUserDictNotConfigured
 	}

@@ -76,17 +76,26 @@ func AbbrevKey(word string) string {
 	return string(b)
 }
 
-// CandidateKeys returns the lookup keys that should index word in user_full.json.
+// CandidateKeys returns the lookup keys that should index word in user_full.json and user_next.json.
+// It includes the exact word, the normalized word (MVS/FVS stripped), and the consonant skeleton key.
 func CandidateKeys(word string) []string {
 	word = trimWord(word)
 	if word == "" {
 		return nil
 	}
-	abbrev := AbbrevKey(word)
-	if abbrev == "" || abbrev == word {
-		return []string{word}
+	keys := make([]string, 0, 3)
+	keys = append(keys, word)
+
+	norm := NormalizeLookupKey(word)
+	if norm != "" && norm != word {
+		keys = append(keys, norm)
 	}
-	return []string{word, abbrev}
+
+	abbrev := AbbrevKey(word)
+	if abbrev != "" && abbrev != word && abbrev != norm {
+		keys = append(keys, abbrev)
+	}
+	return keys
 }
 
 // NormalizeLookupKey strips MVS/FVS, NNBSP, ZWJ, punctuation, and other non-letters.

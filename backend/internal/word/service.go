@@ -20,6 +20,11 @@ type UserWordStore interface {
 	AddUserWord(keys []string, word string, nextWords []string) error
 }
 
+type UserScoredWordStore interface {
+	UserWordStore
+	AddUserScoredWord(keys []string, word store.ScoredWord, nextWords []store.ScoredWord) error
+}
+
 type UserOverlayGenerationStore interface {
 	UserOverlayGeneration() (uint64, bool)
 }
@@ -84,17 +89,41 @@ func (s *Service) invalidateCache() {
 }
 
 func (s *Service) AddUserWord(word string, nextWords []string) error {
+	scoredNext := make([]store.ScoredWord, 0, len(nextWords))
+	for _, w := range nextWords {
+		if w != "" {
+			scoredNext = append(scoredNext, store.ScoredWord{Word: w, Order: 0})
+		}
+	}
+	return s.AddUserScoredWord(store.ScoredWord{Word: word, Order: 0}, scoredNext)
+}
+
+func (s *Service) AddUserScoredWord(word store.ScoredWord, nextWords []store.ScoredWord) error {
 	userStore, ok := s.store.(UserWordStore)
 	if !ok {
 		return store.ErrUserDictNotConfigured
 	}
-	keys := mongol.CandidateKeys(word)
+	keys := mongol.CandidateKeys(word.Word)
 	if len(keys) == 0 {
 		return errors.New("word is required")
 	}
-	if err := userStore.AddUserWord(keys, word, nextWords); err != nil {
-		return err
+
+	if scoredStore, ok := s.store.(UserScoredWordStore); ok {
+		if err := scoredStore.AddUserScoredWord(keys, word, nextWords); err != nil {
+			return err
+		}
+	} else {
+		plainNext := make([]string, 0, len(nextWords))
+		for _, nw := range nextWords {
+			if nw.Word != "" {
+				plainNext = append(plainNext, nw.Word)
+			}
+		}
+		if err := userStore.AddUserWord(keys, word.Word, plainNext); err != nil {
+			return err
+		}
 	}
+
 	// Drop every cached query, including spellings that do not match the
 	// stored lookup keys. The next request reads the updated overlay.
 	s.invalidateCache()

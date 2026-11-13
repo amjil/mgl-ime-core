@@ -24,6 +24,11 @@ type WordService interface {
 	AddUserWord(word string, nextWords []string) error
 }
 
+type ScoredWordService interface {
+	WordService
+	AddUserScoredWord(word store.ScoredWord, nextWords []store.ScoredWord) error
+}
+
 type WordHandler struct {
 	service WordService
 }
@@ -37,8 +42,9 @@ type wordRequest struct {
 }
 
 type addUserWordRequest struct {
-	Word      string   `json:"word"`
-	NextWords []string `json:"nextWords"`
+	Word      string            `json:"word"`
+	Order     float64           `json:"order"`
+	NextWords []json.RawMessage `json:"nextWords"`
 }
 
 // scoredTuple serializes directly as a JSON 2-tuple ["word", order] without []any boxing.
@@ -90,9 +96,28 @@ func (h *WordHandler) HandleAddUserWord(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := h.service.AddUserWord(word, nextWords); err != nil {
-		if errors.Is(err, store.ErrUserDictNotConfigured) {
-			writeError(w, http.StatusServiceUnavailable, err.Error())
+	var saveErr error
+	hasCustomOrder := word.Order != 0
+	for _, nw := range nextWords {
+		if nw.Order != 0 {
+			hasCustomOrder = true
+			break
+		}
+	}
+
+	if scoredSvc, ok := h.service.(ScoredWordService); ok && hasCustomOrder {
+		saveErr = scoredSvc.AddUserScoredWord(word, nextWords)
+	} else {
+		plainNext := make([]string, 0, len(nextWords))
+		for _, nw := range nextWords {
+			plainNext = append(plainNext, nw.Word)
+		}
+		saveErr = h.service.AddUserWord(word.Word, plainNext)
+	}
+
+	if saveErr != nil {
+		if errors.Is(saveErr, store.ErrUserDictNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, saveErr.Error())
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to save user word")
@@ -129,44 +154,48 @@ func encodeScoredList(words []store.ScoredWord) []scoredTuple {
 	return out
 }
 
-func parseAddUserWordRequest(r *http.Request) (word string, nextWords []string, err error) {
+func parseAddUserWordRequest(r *http.Request) (word store.ScoredWord, nextWords []store.ScoredWord, err error) {
 	defer r.Body.Close()
 
 	r.Body = http.MaxBytesReader(nil, r.Body, maxRequestBodyBytes)
-
 	var req addUserWordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			return "", nil, errors.New("request body too large")
+			return store.ScoredWord{}, nil, errors.New("request body too large")
 		}
-		return "", nil, errors.New("invalid json body")
+		return store.ScoredWord{}, nil, errors.New("invalid json body")
 	}
 
-	word = strings.TrimSpace(req.Word)
-	if word == "" {
-		return "", nil, errors.New("word is required")
+	trimmed := strings.TrimSpace(req.Word)
+	if trimmed == "" {
+		return store.ScoredWord{}, nil, errors.New("word is required")
 	}
-	if utf8.RuneCountInString(word) > maxWordRunes {
-		return "", nil, errors.New("word is too long")
+	if utf8.RuneCountInString(trimmed) > maxWordRunes {
+		return store.ScoredWord{}, nil, errors.New("word is too long")
 	}
-
 	if len(req.NextWords) > maxNextWordsInRequest {
-		return "", nil, errors.New("nextWords is too long")
+		return store.ScoredWord{}, nil, errors.New("nextWords is too long")
 	}
 
-	nextWords = make([]string, 0, len(req.NextWords))
+	nextWords = make([]store.ScoredWord, 0, len(req.NextWords))
 	for _, raw := range req.NextWords {
-		w := strings.TrimSpace(raw)
-		if w == "" {
+		// Ignore empty strings in array like ["", " "]
+		var rawStr string
+		if json.Unmarshal(raw, &rawStr) == nil && strings.TrimSpace(rawStr) == "" {
 			continue
 		}
-		if utf8.RuneCountInString(w) > maxWordRunes {
-			return "", nil, errors.New("nextWords entry is too long")
+		sw, ok := store.ParseScoredWordItem(raw)
+		if !ok {
+			return store.ScoredWord{}, nil, errors.New("invalid nextWords entry")
 		}
-		nextWords = append(nextWords, w)
+		if utf8.RuneCountInString(sw.Word) > maxWordRunes {
+			return store.ScoredWord{}, nil, errors.New("nextWords entry is too long")
+		}
+		nextWords = append(nextWords, sw)
 	}
-	return word, nextWords, nil
+
+	return store.ScoredWord{Word: trimmed, Order: req.Order}, nextWords, nil
 }
 
 func parseWordRequest(r *http.Request) (string, error) {

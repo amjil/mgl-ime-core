@@ -73,3 +73,110 @@ func TestJSONStoreUserOverlayMergeAndPersist(t *testing.T) {
 		t.Fatalf("unexpected user_next.json: %#v", userNextMap)
 	}
 }
+
+func TestAddUserScoredWordWeightedNextWords(t *testing.T) {
+	dir := t.TempDir()
+	full := filepath.Join(dir, "full.json")
+	next := filepath.Join(dir, "next.json")
+	userFull := filepath.Join(dir, "user_full.json")
+	userNext := filepath.Join(dir, "user_next.json")
+
+	word := "ᠮᠤᠩᠭᠤᠯ"
+	if err := os.WriteFile(full, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(next, []byte(`{"`+word+`":["base"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := NewJSONStoreWithUser(full, next, userFull, userNext)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keys := mongol.CandidateKeys(word)
+	err = st.AddUserScoredWord(keys, ScoredWord{Word: word}, []ScoredWord{
+		{Word: "ᠤᠯᠤᠰ", Order: 10},
+		{Word: "ᠬᠡᠯᠡ", Order: 50},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := st.GetNextWords(word)
+	if !ok || len(got) < 3 {
+		t.Fatalf("GetNextWords = %#v ok=%v", got, ok)
+	}
+	if got[0].Word != "ᠬᠡᠯᠡ" || got[1].Word != "ᠤᠯᠤᠰ" || got[2].Word != "base" {
+		t.Fatalf("weighted order = %#v", got)
+	}
+	if got[0].Order <= got[1].Order || got[1].Order < UserFeedbackBaseOrder {
+		t.Fatalf("feedback scores = %#v", got[:2])
+	}
+}
+
+func TestAddUserWordMRUBoostsLatestFeedback(t *testing.T) {
+	dir := t.TempDir()
+	full := filepath.Join(dir, "full.json")
+	next := filepath.Join(dir, "next.json")
+	userFull := filepath.Join(dir, "user_full.json")
+	userNext := filepath.Join(dir, "user_next.json")
+
+	word := "ᠮᠤᠩᠭᠤᠯ"
+	if err := os.WriteFile(full, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(next, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := NewJSONStoreWithUser(full, next, userFull, userNext)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keys := mongol.CandidateKeys(word)
+	if err := st.AddUserWord(keys, word, []string{"old-a", "old-b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddUserWord(keys, word, []string{"new-a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := st.GetNextWords(word)
+	if !ok || len(got) < 3 || got[0].Word != "new-a" {
+		t.Fatalf("MRU next words = %#v ok=%v", got, ok)
+	}
+}
+
+func TestNextWordsLookupHitsNormalizedKey(t *testing.T) {
+	dir := t.TempDir()
+	full := filepath.Join(dir, "full.json")
+	next := filepath.Join(dir, "next.json")
+	userFull := filepath.Join(dir, "user_full.json")
+	userNext := filepath.Join(dir, "user_next.json")
+
+	raw := "ᠪᠠᠷᠠᠭᠠᠨ\u180e"
+	norm := mongol.NormalizeLookupKey(raw)
+	if err := os.WriteFile(full, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(next, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := NewJSONStoreWithUser(full, next, userFull, userNext)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keys := mongol.CandidateKeys(raw)
+	if err := st.AddUserWord(keys, raw, []string{"feedback"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := st.GetNextWords(norm)
+	if !ok || len(got) == 0 || got[0].Word != "feedback" {
+		t.Fatalf("GetNextWords(%q) = %#v ok=%v", norm, got, ok)
+	}
+}
