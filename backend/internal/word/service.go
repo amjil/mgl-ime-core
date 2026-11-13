@@ -5,8 +5,8 @@ import (
 	"errors"
 	"sync"
 
-	"m-v-k/backend/internal/word/mongol"
-	"m-v-k/backend/internal/word/store"
+	"mgl-ime-core/backend/internal/word/mongol"
+	"mgl-ime-core/backend/internal/word/store"
 )
 
 type Store interface {
@@ -108,7 +108,7 @@ func (s *Service) epoch() uint64 {
 func (s *Service) AddUserWord(word string, nextWords []string) error {
 	userStore, ok := s.store.(UserWordStore)
 	if !ok {
-		return errors.New("user dictionary is not configured")
+		return store.ErrUserDictNotConfigured
 	}
 
 	keys := mongol.CandidateKeys(word)

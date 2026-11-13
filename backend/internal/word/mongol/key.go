@@ -15,28 +15,23 @@ const (
 	codeMongolPunctStart = 0x1800
 	codeMongolPunctEnd   = 0x1809
 	codeNirugu           = 0x180A
-)
 
-// Mongolian variation selectors and MVS (matches linguistics.cljd fvs-or-mvs).
-var fvsOrMVS = map[rune]struct{}{
-	0x180B: {}, 0x180C: {}, 0x180D: {}, 0x180E: {}, 0x180F: {},
-}
+	codeFVSStart = 0x180B
+	codeFVSEnd   = 0x180F
+)
 
 // isAbbrevIgnored drops vowels, MVS/FVS, NNBSP, ZWJ, nirugu, and Mongolian punctuation.
 func isAbbrevIgnored(r rune) bool {
 	if r == codeNNBSP || r == codeZWJ || r == codeNirugu {
 		return true
 	}
-	if _, ok := fvsOrMVS[r]; ok {
+	if r >= codeFVSStart && r <= codeFVSEnd {
 		return true
 	}
 	if r >= codeMongolPunctStart && r <= codeMongolPunctEnd {
 		return true
 	}
-	if !IsMongolianLetter(r) {
-		return true
-	}
-	return false
+	return !IsMongolianLetter(r)
 }
 
 func IsVowel(r rune) bool {
@@ -58,15 +53,12 @@ func AbbrevKey(word string) string {
 	if word == "" {
 		return ""
 	}
-
-	var b []rune
+	b := make([]rune, 0, len(word)/3+1)
 	leadingVowelDone := false
-
 	for _, r := range word {
 		if isAbbrevIgnored(r) {
 			continue
 		}
-
 		if IsVowel(r) {
 			if !leadingVowelDone && len(b) == 0 {
 				b = append(b, r)
@@ -74,7 +66,6 @@ func AbbrevKey(word string) string {
 			}
 			continue
 		}
-
 		if IsConsonant(r) {
 			if len(b) == 0 {
 				leadingVowelDone = true
@@ -82,7 +73,6 @@ func AbbrevKey(word string) string {
 			b = append(b, r)
 		}
 	}
-
 	return string(b)
 }
 
@@ -92,7 +82,6 @@ func CandidateKeys(word string) []string {
 	if word == "" {
 		return nil
 	}
-
 	abbrev := AbbrevKey(word)
 	if abbrev == "" || abbrev == word {
 		return []string{word}
@@ -106,7 +95,7 @@ func NormalizeLookupKey(word string) string {
 	if word == "" {
 		return ""
 	}
-	var b []rune
+	b := make([]rune, 0, len(word)/3+1)
 	for _, r := range word {
 		if isAbbrevIgnored(r) {
 			continue

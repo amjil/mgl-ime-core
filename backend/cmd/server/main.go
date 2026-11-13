@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
-	apphttp "m-v-k/backend/internal/http"
-	"m-v-k/backend/internal/http/handlers"
-	"m-v-k/backend/internal/word"
-	"m-v-k/backend/internal/word/store"
+	apphttp "mgl-ime-core/backend/internal/http"
+	"mgl-ime-core/backend/internal/http/handlers"
+	"mgl-ime-core/backend/internal/word"
+	"mgl-ime-core/backend/internal/word/store"
 )
 
 func main() {
@@ -64,9 +67,24 @@ func main() {
 
 	log.Printf("loaded word data from %s and %s (user overlay: %s, %s)", fullPath, nextPath, userFullPath, userNextPath)
 	log.Printf("backend server listening on %s", addr)
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("server stopped: %v", err)
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server stopped: %v", err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+
+	log.Printf("shutdown signal received, draining requests...")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("graceful shutdown failed: %v", err)
 	}
+	log.Printf("server shut down")
 }
 
 func resolveDataDir() (string, error) {

@@ -3,8 +3,8 @@ package word
 import (
 	"testing"
 
-	"m-v-k/backend/internal/word/mongol"
-	"m-v-k/backend/internal/word/store"
+	"mgl-ime-core/backend/internal/word/mongol"
+	"mgl-ime-core/backend/internal/word/store"
 )
 
 type overlayStore struct {

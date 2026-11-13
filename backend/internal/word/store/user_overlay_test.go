@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"m-v-k/backend/internal/word/mongol"
+	"mgl-ime-core/backend/internal/word/mongol"
 )
 
 func TestJSONStoreUserOverlayMergeAndPersist(t *testing.T) {

@@ -2,13 +2,20 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
-	"m-v-k/backend/internal/word/mongol"
+	"mgl-ime-core/backend/internal/word/mongol"
 )
+
+// ErrUserDictNotConfigured is returned when attempting to add user words without user overlay paths.
+var ErrUserDictNotConfigured = errors.New("user dictionary is not configured")
+
+const maxUserNextWords = 64
 
 func loadUserWordMap(path string) (map[string][]string, error) {
 	if _, err := os.Stat(path); err != nil {
@@ -42,13 +49,11 @@ func saveWordMap(path string, data map[string][]string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-
 	tmp := path + ".tmp"
 	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
-
 	enc := json.NewEncoder(file)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(data); err != nil {
@@ -70,10 +75,8 @@ func mergeWordLists(base, overlay []string) []string {
 	if len(base) == 0 {
 		return cloneStrings(overlay)
 	}
-
 	seen := make(map[string]struct{}, len(base)+len(overlay))
 	out := make([]string, 0, len(base)+len(overlay))
-
 	appendUnique := func(words []string) {
 		for _, w := range words {
 			if w == "" {
@@ -86,25 +89,26 @@ func mergeWordLists(base, overlay []string) []string {
 			out = append(out, w)
 		}
 	}
-
 	appendUnique(overlay)
 	appendUnique(base)
 	return out
 }
 
 func prependWord(list []string, word string) []string {
-	return prependWords(list, []string{word})
+	return prependWords(list, []string{word}, 0)
 }
 
-func prependWords(list []string, words []string) []string {
+func prependWords(list []string, words []string, limit int) []string {
 	if len(words) == 0 {
 		return cloneStrings(list)
 	}
 	seen := make(map[string]struct{}, len(list)+len(words))
 	out := make([]string, 0, len(list)+len(words))
-
 	appendUnique := func(w string) {
 		if w == "" {
+			return
+		}
+		if limit > 0 && len(out) >= limit {
 			return
 		}
 		if _, ok := seen[w]; ok {
@@ -113,7 +117,6 @@ func prependWords(list []string, words []string) []string {
 		seen[w] = struct{}{}
 		out = append(out, w)
 	}
-
 	for _, w := range words {
 		appendUnique(w)
 	}
@@ -132,15 +135,37 @@ func cloneStrings(values []string) []string {
 	return out
 }
 
+// buildAbbrevIndex precomputes a secondary index mapping AbbrevKey(storedKey) -> merged words
+// for entries that are only stored under their full word key, avoiding O(N) map scans on lookup.
+func buildAbbrevIndex(data map[string][]string) map[string][]string {
+	idx := make(map[string][]string)
+	for storedKey, values := range data {
+		if len(values) == 0 {
+			continue
+		}
+		abbrev := mongol.AbbrevKey(storedKey)
+		if abbrev == "" || abbrev == storedKey {
+			continue
+		}
+		// Index every full-word key under its abbrev so lookup matches the old O(N)
+		// scan: AbbrevKey(storedKey) == lookupKey. Direct data[abbrev] hits still win
+		// because getOverlayList merges earlier keys ahead of this fallback.
+		idx[abbrev] = mergeWordLists(values, idx[abbrev])
+	}
+	return idx
+}
+
 type userOverlay struct {
 	mu          sync.RWMutex
 	fullPath    string
 	nextPath    string
 	full        map[string][]string
 	next        map[string][]string
-	fullModTime int64
-	nextModTime int64
-	generation  uint64
+	fullAbbrev  map[string][]string
+	nextAbbrev  map[string][]string
+	fullModTime atomic.Int64
+	nextModTime atomic.Int64
+	generation  atomic.Uint64
 }
 
 func fileModTime(path string) int64 {
@@ -156,6 +181,8 @@ func newUserOverlay(fullPath, nextPath string) (*userOverlay, error) {
 		fullPath: fullPath,
 		nextPath: nextPath,
 	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
 	if err := u.reloadLocked(); err != nil {
 		return nil, err
 	}
@@ -173,52 +200,69 @@ func (u *userOverlay) reloadLocked() error {
 	}
 	u.full = full
 	u.next = next
-	u.fullModTime = fileModTime(u.fullPath)
-	u.nextModTime = fileModTime(u.nextPath)
-	u.generation++
+	u.fullAbbrev = buildAbbrevIndex(full)
+	u.nextAbbrev = buildAbbrevIndex(next)
+	u.fullModTime.Store(fileModTime(u.fullPath))
+	u.nextModTime.Store(fileModTime(u.nextPath))
+	u.generation.Add(1)
 	return nil
 }
 
-// refreshGeneration reloads overlay files when stale and returns the current generation.
+// isStale checks file modification times without acquiring the write lock first.
+func (u *userOverlay) isStale() bool {
+	return fileModTime(u.fullPath) != u.fullModTime.Load() ||
+		fileModTime(u.nextPath) != u.nextModTime.Load()
+}
+
+// refreshGeneration reloads overlay files only when disk modification times change.
 func (u *userOverlay) refreshGeneration() uint64 {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	_ = u.reloadIfStaleLocked()
-	return u.generation
+	if u.isStale() {
+		u.mu.Lock()
+		if u.isStale() {
+			_ = u.reloadLocked()
+		}
+		u.mu.Unlock()
+	}
+	return u.generation.Load()
 }
 
 func (u *userOverlay) reloadIfStaleLocked() error {
-	fullMod := fileModTime(u.fullPath)
-	nextMod := fileModTime(u.nextPath)
-	if fullMod == u.fullModTime && nextMod == u.nextModTime {
+	if !u.isStale() {
 		return nil
 	}
 	return u.reloadLocked()
 }
 
-func (u *userOverlay) reloadIfStale() error {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return u.reloadIfStaleLocked()
-}
-
 func (u *userOverlay) getCandidates(key string) ([]string, bool) {
-	return u.getOverlayList(key, u.full)
+	return u.getOverlayList(key, false)
 }
 
 func (u *userOverlay) getNextWords(key string) ([]string, bool) {
-	return u.getOverlayList(key, u.next)
+	return u.getOverlayList(key, true)
 }
 
-// getOverlayList merges user overlay entries for lookupKey. Besides exact key
-// hits, entries stored only under a full word key still match abbrev lookups
-// (AbbrevKey(storedKey) == lookupKey).
-func (u *userOverlay) getOverlayList(lookupKey string, data map[string][]string) ([]string, bool) {
-	if err := u.reloadIfStale(); err != nil {
-		return nil, false
+// getOverlayList merges user overlay entries for lookupKey in O(1) using precomputed abbrev indexes.
+func (u *userOverlay) getOverlayList(lookupKey string, isNext bool) ([]string, bool) {
+	if u.isStale() {
+		u.mu.Lock()
+		if u.isStale() {
+			if err := u.reloadLocked(); err != nil {
+				u.mu.Unlock()
+				return nil, false
+			}
+		}
+		u.mu.Unlock()
 	}
+
 	u.mu.RLock()
 	defer u.mu.RUnlock()
+
+	data := u.full
+	abbrevIdx := u.fullAbbrev
+	if isNext {
+		data = u.next
+		abbrevIdx = u.nextAbbrev
+	}
 
 	var merged []string
 	found := false
@@ -236,6 +280,7 @@ func (u *userOverlay) getOverlayList(lookupKey string, data map[string][]string)
 		if !ok || len(values) == 0 {
 			return
 		}
+		// Keep earlier matched keys authoritative ahead of fallback keys.
 		merged = mergeWordLists(values, merged)
 		found = true
 	}
@@ -245,17 +290,9 @@ func (u *userOverlay) getOverlayList(lookupKey string, data map[string][]string)
 	}
 	tryKey(mongol.AbbrevKey(lookupKey))
 
-	for storedKey, values := range data {
-		if len(values) == 0 {
-			continue
-		}
-		if _, done := seenKeys[storedKey]; done {
-			continue
-		}
-		if mongol.AbbrevKey(storedKey) == lookupKey {
-			merged = mergeWordLists(values, merged)
-			found = true
-		}
+	if fallback, ok := abbrevIdx[lookupKey]; ok && len(fallback) > 0 {
+		merged = mergeWordLists(fallback, merged)
+		found = true
 	}
 
 	if !found {
@@ -271,10 +308,11 @@ func (u *userOverlay) addUserWord(keys []string, word string, nextWords []string
 	if err := u.reloadIfStaleLocked(); err != nil {
 		return err
 	}
-
 	for _, key := range keys {
 		u.full[key] = prependWord(u.full[key], word)
 	}
+	u.fullAbbrev = buildAbbrevIndex(u.full)
+
 	if len(nextWords) > 0 {
 		nextKeys := keys
 		if len(nextKeys) == 0 {
@@ -284,20 +322,22 @@ func (u *userOverlay) addUserWord(keys []string, word string, nextWords []string
 			nextKeys = []string{word}
 		}
 		for _, key := range nextKeys {
-			u.next[key] = prependWords(u.next[key], nextWords)
+			u.next[key] = prependWords(u.next[key], nextWords, maxUserNextWords)
 		}
+		u.nextAbbrev = buildAbbrevIndex(u.next)
 	}
 
 	if err := saveWordMap(u.fullPath, u.full); err != nil {
 		return err
 	}
-	u.fullModTime = fileModTime(u.fullPath)
+	u.fullModTime.Store(fileModTime(u.fullPath))
+
 	if len(nextWords) > 0 {
 		if err := saveWordMap(u.nextPath, u.next); err != nil {
 			return err
 		}
-		u.nextModTime = fileModTime(u.nextPath)
+		u.nextModTime.Store(fileModTime(u.nextPath))
 	}
-	u.generation++
+	u.generation.Add(1)
 	return nil
 }

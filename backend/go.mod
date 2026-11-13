@@ -1,3 +1,3 @@
-module m-v-k/backend
+module mgl-ime-core/backend
 
 go 1.22

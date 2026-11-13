@@ -8,8 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
-	"m-v-k/backend/internal/word/mongol"
+	"mgl-ime-core/backend/internal/word/mongol"
 )
 
 type JSONStore struct {
@@ -23,18 +24,36 @@ func NewJSONStore(fullJSONPath, nextJSONPath string) (*JSONStore, error) {
 }
 
 func NewJSONStoreWithUser(fullJSONPath, nextJSONPath, userFullPath, userNextPath string) (*JSONStore, error) {
-	candidateMap, err := loadWordMap(fullJSONPath)
-	if err != nil {
-		return nil, fmt.Errorf("load full json (%s): %w", fullJSONPath, err)
-	}
+	var (
+		candidateMap map[string][]ScoredWord
+		nextMap      map[string][]ScoredWord
+		fullErr      error
+		nextErr      error
+		wg           sync.WaitGroup
+	)
 
-	nextMap, err := loadWordMap(nextJSONPath)
-	if err != nil {
-		return nil, fmt.Errorf("load next json (%s): %w", nextJSONPath, err)
+	// Load full.json and next.json concurrently to speed up cold start.
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		candidateMap, fullErr = loadWordMap(fullJSONPath)
+	}()
+	go func() {
+		defer wg.Done()
+		nextMap, nextErr = loadWordMap(nextJSONPath)
+	}()
+	wg.Wait()
+
+	if fullErr != nil {
+		return nil, fmt.Errorf("load full json (%s): %w", fullJSONPath, fullErr)
+	}
+	if nextErr != nil {
+		return nil, fmt.Errorf("load next json (%s): %w", nextJSONPath, nextErr)
 	}
 
 	var user *userOverlay
 	if userFullPath != "" && userNextPath != "" {
+		var err error
 		user, err = newUserOverlay(userFullPath, userNextPath)
 		if err != nil {
 			return nil, err
@@ -78,17 +97,16 @@ func (s *JSONStore) lookupMerged(word string, baseMap map[string][]ScoredWord, o
 	var baseAll []ScoredWord
 	var overlayAll []ScoredWord
 	found := false
-	seenKeys := make(map[string]struct{}, 2)
 
-	for _, key := range mongol.LookupKeyVariants(word) {
+	variants := mongol.LookupKeyVariants(word)
+	for i, key := range variants {
 		if key == "" {
 			continue
 		}
-		if _, done := seenKeys[key]; done {
+		// Deduplicate adjacent variants without allocating a map.
+		if i > 0 && key == variants[0] {
 			continue
 		}
-		seenKeys[key] = struct{}{}
-
 		base, baseOK := baseMap[key]
 		var overlay []ScoredWord
 		overlayOK := false
@@ -115,7 +133,7 @@ func (s *JSONStore) lookupMerged(word string, baseMap map[string][]ScoredWord, o
 
 func (s *JSONStore) AddUserWord(keys []string, word string, nextWords []string) error {
 	if s.user == nil {
-		return fmt.Errorf("user dictionary is not configured")
+		return ErrUserDictNotConfigured
 	}
 	return s.user.addUserWord(keys, word, nextWords)
 }

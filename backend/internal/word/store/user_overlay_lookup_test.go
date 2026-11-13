@@ -45,6 +45,57 @@ func TestCandidatesOverlayMatchesAbbrevWhenOnlyFullWordKeyStored(t *testing.T) {
 	}
 }
 
+func TestCandidatesOverlayMergesFullWordFallbackEvenWhenAbbrevKeyExists(t *testing.T) {
+	dir := t.TempDir()
+	full := filepath.Join(dir, "full.json")
+	next := filepath.Join(dir, "next.json")
+	userFull := filepath.Join(dir, "user_full.json")
+	userNext := filepath.Join(dir, "user_next.json")
+
+	const abbrev = "ᠬᠨ"
+	const word = "ᠬᠠᠨᠢ"
+	const fromAbbrev = "from-abbrev"
+	const fromFull = "from-full"
+
+	if err := os.WriteFile(full, []byte(`{"`+abbrev+`":["base"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(next, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Both a direct abbrev entry and a full-word-only entry that abbreviates to the same key.
+	payload := `{"` + abbrev + `":["` + fromAbbrev + `"],"` + word + `":["` + fromFull + `"]}`
+	if err := os.WriteFile(userFull, []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userNext, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := NewJSONStoreWithUser(full, next, userFull, userNext)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := st.GetCandidates(abbrev)
+	if !ok {
+		t.Fatal("expected hit")
+	}
+	if len(got) < 2 || got[0].Word != fromAbbrev {
+		t.Fatalf("GetCandidates(%q) = %#v, want %q first", abbrev, got, fromAbbrev)
+	}
+	foundFull := false
+	for _, sw := range got {
+		if sw.Word == fromFull {
+			foundFull = true
+			break
+		}
+	}
+	if !foundFull {
+		t.Fatalf("GetCandidates(%q) = %#v, missing full-word fallback %q", abbrev, got, fromFull)
+	}
+}
+
 func TestRealKhaniUserOverlayAbbrev(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {

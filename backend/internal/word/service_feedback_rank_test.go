@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"m-v-k/backend/internal/word"
-	"m-v-k/backend/internal/word/store"
+	"mgl-ime-core/backend/internal/word"
+	"mgl-ime-core/backend/internal/word/store"
 )
 
 func TestFeedbackAppearsOnNextQueryAndRanksFirst(t *testing.T) {

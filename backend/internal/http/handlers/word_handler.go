@@ -1,18 +1,21 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
-	"m-v-k/backend/internal/word/store"
+	"mgl-ime-core/backend/internal/word/store"
 )
 
 const (
-	maxRequestBodyBytes = 4096
-	maxWordRunes        = 256
+	maxRequestBodyBytes   = 4096
+	maxWordRunes          = 256
+	maxNextWordsInRequest = 64
 )
 
 type WordService interface {
@@ -38,6 +41,32 @@ type addUserWordRequest struct {
 	NextWords []string `json:"nextWords"`
 }
 
+// scoredTuple serializes directly as a JSON 2-tuple ["word", order] without []any boxing.
+type scoredTuple store.ScoredWord
+
+func (t scoredTuple) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	buf.Grow(len(t.Word) + 16)
+	buf.WriteByte('[')
+	wordJSON, err := json.Marshal(t.Word)
+	if err != nil {
+		return nil, err
+	}
+	buf.Write(wordJSON)
+	buf.WriteByte(',')
+	buf.WriteString(strconv.FormatFloat(t.Order, 'f', -1, 64))
+	buf.WriteByte(']')
+	return buf.Bytes(), nil
+}
+
+type candidatesResponse struct {
+	Candidates []scoredTuple `json:"candidates"`
+}
+
+type nextWordsResponse struct {
+	NextWords []scoredTuple `json:"nextWords"`
+}
+
 func (h *WordHandler) HandleCandidates(w http.ResponseWriter, r *http.Request) {
 	word, err := parseWordRequest(r)
 	if err != nil {
@@ -51,7 +80,7 @@ func (h *WordHandler) HandleCandidates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"candidates": encodeScoredList(candidates)})
+	writeJSON(w, http.StatusOK, candidatesResponse{Candidates: encodeScoredList(candidates)})
 }
 
 func (h *WordHandler) HandleAddUserWord(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +91,7 @@ func (h *WordHandler) HandleAddUserWord(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := h.service.AddUserWord(word, nextWords); err != nil {
-		if err.Error() == "user dictionary is not configured" {
+		if errors.Is(err, store.ErrUserDictNotConfigured) {
 			writeError(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
@@ -86,21 +115,19 @@ func (h *WordHandler) HandleNextWords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"nextWords": encodeScoredList(nextWords)})
+	writeJSON(w, http.StatusOK, nextWordsResponse{NextWords: encodeScoredList(nextWords)})
 }
 
-func encodeScoredList(words []store.ScoredWord) []any {
-	out := make([]any, 0, len(words))
+func encodeScoredList(words []store.ScoredWord) []scoredTuple {
+	out := make([]scoredTuple, 0, len(words))
 	for _, w := range words {
 		if w.Word == "" {
 			continue
 		}
-		out = append(out, []any{w.Word, w.Order})
+		out = append(out, scoredTuple(w))
 	}
 	return out
 }
-
-const maxNextWordsInRequest = 64
 
 func parseAddUserWordRequest(r *http.Request) (word string, nextWords []string, err error) {
 	defer r.Body.Close()

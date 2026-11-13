@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"m-v-k/backend/internal/word/store"
+	"mgl-ime-core/backend/internal/word/store"
 )
 
 type mockWordService struct {
