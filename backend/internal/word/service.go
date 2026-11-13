@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"mgl-ime-core/backend/internal/word/mongol"
 	"mgl-ime-core/backend/internal/word/store"
@@ -24,23 +25,26 @@ type UserOverlayGenerationStore interface {
 }
 
 type Service struct {
-	store Store
-	cache *resultCache
-
-	mu               sync.Mutex
-	cacheEpoch       uint64
-	observedStoreGen uint64
-	storeGenReady    bool
+	store            Store
+	cache            *resultCache
+	cacheEpoch       atomic.Uint64
+	observedStoreGen atomic.Uint64
 }
 
 func NewService(store Store, cacheCapacity int) *Service {
 	if cacheCapacity <= 0 {
 		cacheCapacity = 1024
 	}
-	return &Service{
+	s := &Service{
 		store: store,
 		cache: newResultCache(cacheCapacity),
 	}
+	if genStore, ok := store.(UserOverlayGenerationStore); ok {
+		if gen, ok := genStore.UserOverlayGeneration(); ok {
+			s.observedStoreGen.Store(gen)
+		}
+	}
+	return s
 }
 
 func (s *Service) GetCandidates(word string) ([]store.ScoredWord, error) {
@@ -62,21 +66,9 @@ func (s *Service) syncUserOverlayCache() {
 	if !ok {
 		return
 	}
-
-	s.mu.Lock()
-	if !s.storeGenReady {
-		s.storeGenReady = true
-		s.observedStoreGen = gen
-		s.mu.Unlock()
-		return
-	}
-	changed := gen != s.observedStoreGen
-	if changed {
-		s.observedStoreGen = gen
-		s.cacheEpoch++
-	}
-	s.mu.Unlock()
-	if changed {
+	prev := s.observedStoreGen.Swap(gen)
+	if prev != gen {
+		s.cacheEpoch.Add(1)
 		s.cache.clear()
 	}
 }
@@ -84,25 +76,11 @@ func (s *Service) syncUserOverlayCache() {
 func (s *Service) invalidateCache() {
 	if genStore, ok := s.store.(UserOverlayGenerationStore); ok {
 		if gen, ok := genStore.UserOverlayGeneration(); ok {
-			s.mu.Lock()
-			s.storeGenReady = true
-			s.observedStoreGen = gen
-			s.cacheEpoch++
-			s.mu.Unlock()
-			s.cache.clear()
-			return
+			s.observedStoreGen.Store(gen)
 		}
 	}
-	s.mu.Lock()
-	s.cacheEpoch++
-	s.mu.Unlock()
+	s.cacheEpoch.Add(1)
 	s.cache.clear()
-}
-
-func (s *Service) epoch() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.cacheEpoch
 }
 
 func (s *Service) AddUserWord(word string, nextWords []string) error {
@@ -110,16 +88,13 @@ func (s *Service) AddUserWord(word string, nextWords []string) error {
 	if !ok {
 		return store.ErrUserDictNotConfigured
 	}
-
 	keys := mongol.CandidateKeys(word)
 	if len(keys) == 0 {
 		return errors.New("word is required")
 	}
-
 	if err := userStore.AddUserWord(keys, word, nextWords); err != nil {
 		return err
 	}
-
 	// Drop every cached query, including spellings that do not match the
 	// stored lookup keys. The next request reads the updated overlay.
 	s.invalidateCache()
@@ -127,7 +102,7 @@ func (s *Service) AddUserWord(word string, nextWords []string) error {
 }
 
 func (s *Service) lookup(cacheKey, word string, load func(string) ([]store.ScoredWord, bool)) []store.ScoredWord {
-	epoch := s.epoch()
+	epoch := s.cacheEpoch.Load()
 	if cached, ok := s.cache.get(cacheKey); ok {
 		return cached
 	}
@@ -138,7 +113,7 @@ func (s *Service) lookup(cacheKey, word string, load func(string) ([]store.Score
 	}
 	// Skip the put when feedback landed while this load was in flight.
 	// Otherwise a slow read of the old list would be cached again.
-	if ok && len(words) > 0 && s.epoch() == epoch {
+	if ok && len(words) > 0 && s.cacheEpoch.Load() == epoch {
 		s.cache.put(cacheKey, words)
 	}
 	return cloneScored(words)

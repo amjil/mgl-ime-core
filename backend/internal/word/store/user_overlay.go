@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -136,23 +137,67 @@ func cloneStrings(values []string) []string {
 }
 
 // buildAbbrevIndex precomputes a secondary index mapping AbbrevKey(storedKey) -> merged words
-// for entries that are only stored under their full word key, avoiding O(N) map scans on lookup.
+// in deterministic key order, avoiding O(N) map scans and random map iteration order on lookup.
 func buildAbbrevIndex(data map[string][]string) map[string][]string {
+	if len(data) == 0 {
+		return make(map[string][]string)
+	}
+	keys := make([]string, 0, len(data))
+	for k, v := range data {
+		if len(v) > 0 {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+
 	idx := make(map[string][]string)
+	for _, storedKey := range keys {
+		abbrev := mongol.AbbrevKey(storedKey)
+		if abbrev == "" || abbrev == storedKey {
+			continue
+		}
+		// Keep earlier keys authoritative while deterministically merging fallback lists.
+		idx[abbrev] = mergeWordLists(data[storedKey], idx[abbrev])
+	}
+	return idx
+}
+
+// updateAbbrevIndexForKeys refreshes only abbrev buckets touched by keys, preserving
+// deterministic merge order without rebuilding unrelated index entries.
+func updateAbbrevIndexForKeys(idx map[string][]string, data map[string][]string, keys []string) {
+	if idx == nil || len(keys) == 0 {
+		return
+	}
+	affected := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		abbrev := mongol.AbbrevKey(key)
+		if abbrev == "" || abbrev == key {
+			continue
+		}
+		affected[abbrev] = struct{}{}
+	}
+	if len(affected) == 0 {
+		return
+	}
+	for abbrev := range affected {
+		delete(idx, abbrev)
+	}
+	contrib := make([]string, 0, len(affected))
 	for storedKey, values := range data {
 		if len(values) == 0 {
 			continue
 		}
 		abbrev := mongol.AbbrevKey(storedKey)
-		if abbrev == "" || abbrev == storedKey {
+		if _, ok := affected[abbrev]; !ok || abbrev == storedKey {
 			continue
 		}
-		// Index every full-word key under its abbrev so lookup matches the old O(N)
-		// scan: AbbrevKey(storedKey) == lookupKey. Direct data[abbrev] hits still win
-		// because getOverlayList merges earlier keys ahead of this fallback.
-		idx[abbrev] = mergeWordLists(values, idx[abbrev])
+		contrib = append(contrib, storedKey)
 	}
-	return idx
+	slices.Sort(contrib)
+	for _, storedKey := range contrib {
+		abbrev := mongol.AbbrevKey(storedKey)
+		idx[abbrev] = mergeWordLists(data[storedKey], idx[abbrev])
+	}
 }
 
 type userOverlay struct {
@@ -311,7 +356,7 @@ func (u *userOverlay) addUserWord(keys []string, word string, nextWords []string
 	for _, key := range keys {
 		u.full[key] = prependWord(u.full[key], word)
 	}
-	u.fullAbbrev = buildAbbrevIndex(u.full)
+	updateAbbrevIndexForKeys(u.fullAbbrev, u.full, keys)
 
 	if len(nextWords) > 0 {
 		nextKeys := keys
@@ -324,7 +369,7 @@ func (u *userOverlay) addUserWord(keys []string, word string, nextWords []string
 		for _, key := range nextKeys {
 			u.next[key] = prependWords(u.next[key], nextWords, maxUserNextWords)
 		}
-		u.nextAbbrev = buildAbbrevIndex(u.next)
+		updateAbbrevIndexForKeys(u.nextAbbrev, u.next, nextKeys)
 	}
 
 	if err := saveWordMap(u.fullPath, u.full); err != nil {
